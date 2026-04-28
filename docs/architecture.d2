@@ -1,0 +1,108 @@
+title: md-diff architecture: markdown pair to rendered HTML diff {
+  near: top-center
+  shape: text
+  style: {
+    font-size: 24
+    bold: true
+  }
+}
+
+flow: "" {
+  style: {
+    stroke: transparent
+    fill: transparent
+  }
+  grid-rows: 1
+  grid-gap: 80
+
+  ingest: "Stage 1: ingest & render" {
+    style: {
+      fill: "#f4f8ff"
+      stroke: "#88a"
+      border-radius: 12
+    }
+    old_md: "old.md" {
+      shape: document
+    }
+    new_md: "new.md" {
+      shape: document
+    }
+    ascii: "ascii_table.py\nconvert_ascii_tables()\nbox-drawing -> <table>" {
+      style.fill: "#cce5ff"
+    }
+    pandoc: "pandoc\nmarkdown -> HTML" {
+      style.fill: "#cce5ff"
+    }
+    old_md -> ascii
+    new_md -> ascii
+    ascii -> pandoc: "preprocessed\nmarkdown"
+  }
+
+  sections: "Stage 2: section split & match" {
+    style: {
+      fill: "#fff7ee"
+      stroke: "#a86"
+      border-radius: 12
+    }
+    split: "rich_diff.split_sections()\npartition by h1-h6" {
+      style.fill: "#ffd9b3"
+    }
+    match: "diff_sections()\nSequenceMatcher on\nheading text" {
+      style.fill: "#ffd9b3"
+    }
+    split -> match: "section\nlists"
+  }
+
+  body: "Stage 3: body diff" {
+    style: {
+      fill: "#f4faf4"
+      stroke: "#6a6"
+      border-radius: 12
+    }
+    blocks: "diff_body()\nsplit_blocks() ->\nprose vs table" {
+      style.fill: "#d9f2d9"
+    }
+    prose: "lxml.html.diff\nhtmldiff() for prose\nDOM-aware <ins>/<del>" {
+      style.fill: "#d9f2d9"
+    }
+    table: "diff_table() ->\ndiff_cells()\nrow & cell-level\ninline diff" {
+      style.fill: "#d9f2d9"
+    }
+    blocks -> prose: "prose\nblocks"
+    blocks -> table: "table\nblocks"
+  }
+
+  output: "Stage 4: assemble & view" {
+    style: {
+      fill: "#f4f8ff"
+      stroke: "#88a"
+      border-radius: 12
+    }
+    assemble: "wrap fragments\ninject CSS\n(green ins / red del)" {
+      style.fill: "#cce5ff"
+    }
+    html: "output.html" {
+      shape: document
+    }
+    sh: "md-diff.sh\nopens in Brave" {
+      style.fill: "#e6e6e6"
+    }
+    assemble -> html
+    html -> sh: "view"
+  }
+
+  ingest.pandoc -> sections.split: "old_html\nnew_html"
+  sections.match -> body.blocks: "matched\nsection pairs"
+  body.prose -> output.assemble: "diffed\nfragments"
+  body.table -> output.assemble: "diffed\ntables"
+}
+
+cli: "CLI entry points" {
+  near: bottom-center
+  shape: text
+  style: {
+    font-size: 14
+    italic: true
+  }
+  label: "md-rich-diff old.md new.md -o output.html   |   ascii-table (utility)   |   md-diff.sh (venv + browser launcher)"
+}
