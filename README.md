@@ -35,8 +35,8 @@ md-diff-gui old.md new.md
 
 | Key | Action |
 | --- | --- |
-| `n` / `Tab` | Next change |
-| `p` / `Shift+Tab` | Previous change |
+| `n` / `Tab` / `Alt+Down` | Next change |
+| `p` / `Shift+Tab` / `Alt+Up` | Previous change |
 | `Ctrl` `+` / `-` / `0` | Zoom in / out / reset |
 | `q`, `Esc`, `Ctrl+W` | Close |
 

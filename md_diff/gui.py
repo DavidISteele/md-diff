@@ -197,8 +197,8 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
             header = Gtk.HeaderBar()
             header.set_title_widget(self.build_title(label_old, label_new))
             for icon, delta, tip in (
-                ("go-up-symbolic", -1, "Previous change (p / Shift+Tab)"),
-                ("go-down-symbolic", 1, "Next change (n / Tab)"),
+                ("go-up-symbolic", -1, "Previous change (p / Shift+Tab / Alt+Up)"),
+                ("go-down-symbolic", 1, "Next change (n / Tab / Alt+Down)"),
             ):
                 button = Gtk.Button(icon_name=icon, tooltip_text=tip)
                 button.connect("clicked", lambda _b, d=delta: self.navigate(d))
@@ -213,6 +213,12 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
 
             keys = Gtk.EventControllerKey()
             keys.connect("key-pressed", self.on_key)
+            # CAPTURE, not the default BUBBLE: the WebView holds focus and
+            # claims arrow keys for scrolling, so Alt+Up/Down would never
+            # reach a bubble-phase handler.  Keys we don't bind still return
+            # False here and propagate on, leaving plain Up/Down scrolling
+            # and WebKit's own shortcuts intact.
+            keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
             self.add_controller(keys)
 
         @staticmethod
@@ -258,13 +264,14 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
         def on_key(self, _controller, keyval, _keycode, state) -> bool:
             ctrl = state & Gdk.ModifierType.CONTROL_MASK
             shift = state & Gdk.ModifierType.SHIFT_MASK
+            alt = state & Gdk.ModifierType.ALT_MASK
             name = Gdk.keyval_name(keyval)
 
             if name in ("Escape", "q") or (ctrl and name == "w"):
                 self.close()
-            elif name == "n" or (name == "Tab" and not shift):
+            elif name == "n" or (name == "Tab" and not shift) or (alt and name == "Down"):
                 self.navigate(1)
-            elif name == "p" or name == "ISO_Left_Tab":
+            elif name == "p" or name == "ISO_Left_Tab" or (alt and name == "Up"):
                 self.navigate(-1)
             elif ctrl and name in ("plus", "equal", "KP_Add"):
                 self.webview.set_zoom_level(self.webview.get_zoom_level() * 1.1)
