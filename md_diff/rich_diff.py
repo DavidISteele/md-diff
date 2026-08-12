@@ -196,12 +196,20 @@ def render_markdown(path: Path) -> str:
 
     Pre-processes ASCII box-drawing diagrams into HTML tables first,
     so pandoc passes them through as raw HTML rather than code blocks.
+
+    Input is parsed as GitHub-flavoured markdown so the rendering matches
+    what GitHub shows.  Pandoc's own markdown dialect differs in ways that
+    surprise: notably it requires a blank line before a bullet list, so a
+    list written directly under its introducing paragraph is swallowed into
+    that paragraph rather than rendered as a list.  `smart` is added back on
+    top of gfm — it is on by default in pandoc's markdown but not in gfm —
+    so quotes and dashes stay typographic.
     """
     with open(path) as f:
         markdown = f.read()
     markdown = convert_ascii_tables(markdown)
     result = subprocess.run(
-        ["pandoc", "-f", "markdown", "-t", "html", "--no-highlight"],
+        ["pandoc", "-f", "gfm+smart", "-t", "html", "--no-highlight"],
         input=markdown, capture_output=True, text=True, check=True,
     )
     return result.stdout
