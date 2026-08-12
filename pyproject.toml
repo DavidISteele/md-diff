@@ -11,4 +11,5 @@ dependencies = ["lxml"]
 
 [project.scripts]
 md-rich-diff = "md_diff.rich_diff:main"
+md-diff-gui = "md_diff.gui:main"
 ascii-table = "md_diff.ascii_table:main"

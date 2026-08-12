@@ -3,6 +3,9 @@ __pycache__/
 *.html
 *.patch
 .claude/
+# Emacs
 *~
+\#*\#
+.\#*
 *.egg-info/
 test-data/

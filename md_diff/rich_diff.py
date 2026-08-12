@@ -207,6 +207,34 @@ def render_markdown(path: Path) -> str:
     return result.stdout
 
 
+def diff_files(old: Path, new: Path) -> str:
+    """Render both files and return the diff body HTML."""
+    return diff_sections(render_markdown(old), render_markdown(new))
+
+
+def build_document(diff_html: str, title: str, extra_css: str = "") -> str:
+    """Wrap diff body HTML in a standalone HTML document."""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>{CSS}{extra_css}</style>
+</head>
+<body>
+<div class="diff-legend">
+    <strong>{title}</strong>
+    &nbsp;&mdash;&nbsp;
+    <del>removed</del>
+    <ins>added</ins>
+</div>
+{diff_html}
+</body>
+</html>
+"""
+
+
 def strip_tags(html: str) -> str:
     """Extract plain text from HTML."""
     return re.sub(r'<[^>]+>', '', html).strip()
@@ -539,9 +567,7 @@ def main():
             print(f"Error: {p} not found", file=sys.stderr)
             sys.exit(1)
 
-    old_html = render_markdown(args.old)
-    new_html = render_markdown(args.new)
-    diff_html = diff_sections(old_html, new_html)
+    diff_html = diff_files(args.old, args.new)
 
     if args.output is None:
         args.output = Path(f"diff-{args.old.stem}-vs-{args.new.stem}.html")
@@ -549,25 +575,7 @@ def main():
     title = f"Diff: {args.old.name} → {args.new.name}"
 
     with open(args.output, "w") as f:
-        f.write(f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>{CSS}</style>
-</head>
-<body>
-<div class="diff-legend">
-    <strong>{title}</strong>
-    &nbsp;&mdash;&nbsp;
-    <del>removed</del>
-    <ins>added</ins>
-</div>
-{diff_html}
-</body>
-</html>
-""")
+        f.write(build_document(diff_html, title))
 
     print(f"Written to {args.output}")
 
