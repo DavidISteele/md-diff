@@ -43,6 +43,12 @@ md-diff-gui old.md new.md
 The header bar shows the current position in the change list (`3 / 17`) and
 the change you jumped to is outlined.
 
+Down the right-hand edge is a meld-style overview of the whole document: one
+marker per change — green for added, red for removed, amber for a changed
+table row — placed where that change falls in the file, with the change you
+jumped to ringed in blue. The scrollbar thumb is drawn on top of it and stays
+visible rather than fading out; click or drag the strip to scroll.
+
 #### WebKit sandbox
 
 WebKit renders page content inside a bubblewrap sandbox that needs
