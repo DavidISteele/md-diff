@@ -22,7 +22,7 @@ CSS = """
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica,
                  Arial, sans-serif;
-    max-width: 960px;
+    max-width: 1100px;
     margin: 2em auto;
     padding: 0 1em;
     line-height: 1.6;
@@ -39,19 +39,53 @@ h1, h2, h3, h4, h5, h6 {
 
 table {
     border-collapse: collapse;
+    table-layout: auto;
     width: 100%;
     margin: 1em 0;
+    font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* Raw HTML passes through to the diff (see render_markdown), so a source
+   document can carry a hand-written <table> whose <col> elements pin
+   column widths.  Auto layout sizes columns to their content instead;
+   a pinned percentage squashes a wide column to fit a narrow source.
+   Pandoc's own markdown reader emits these too, from the source table's
+   character widths -- gfm does not, which is why render_markdown asks
+   for it. This keeps the rendering correct if either input changes. */
+col {
+    width: auto !important;
 }
 
 th, td {
     border: 1px solid #d1d9e0;
     padding: 6px 12px;
     text-align: left;
+    vertical-align: top;
 }
 
 th {
     background: #f6f8fa;
     font-weight: 600;
+}
+
+/* An ID column of "FR-1.3f"-style keys next to a column of prose.  A
+   hyphen is a line-break opportunity, so the column's minimum content
+   width is "1.3f", not "FR-1.3f"; auto layout hands a column facing
+   long prose exactly that minimum, and every ID wraps onto two lines.
+   One line per key sizes the column to its longest key instead.  The
+   cost is that a first column holding sentences rather than keys now
+   widens the table past the page -- an over-wide table rather than a
+   shredded one, and the docs this renders key their tables. Converted
+   ASCII tables are exempt: their first column carries diagram prose. */
+table:not(.ascii-converted) th:first-child,
+table:not(.ascii-converted) td:first-child {
+    white-space: nowrap;
+}
+
+/* Row banding -- a wide table with tall cells is hard to read across
+   without it, and diff rows are often tall. */
+tr:nth-child(even) td {
+    background: #f6f8fa66;
 }
 
 code {
