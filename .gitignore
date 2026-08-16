@@ -10,3 +10,6 @@ __pycache__/
 *.egg-info/
 test-data/
 build/
+# Viewer build products
+viewer/md-diff-view
+viewer/nav_js.h

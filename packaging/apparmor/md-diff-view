@@ -1,0 +1,37 @@
+# AppArmor profile for md-diff's HTML viewer.
+#
+# Ubuntu 24.04 restricts unprivileged user namespaces to executables an
+# AppArmor profile grants them to
+# (kernel.apparmor_restrict_unprivileged_userns=1).  WebKit builds its
+# sandbox with bubblewrap, which needs one, so without this profile the
+# viewer has to run --no-sandbox -- and a document that reaches a bug in the
+# renderer is then running as your user account rather than inside an empty
+# cell.
+#
+# Like Ubuntu's own profiles for Firefox and Brave, this imposes no
+# confinement of its own -- flags=(unconfined) -- and exists only to name the
+# binary and grant it `userns`.  The grant is narrow because the binary is:
+# it renders one HTML document handed to it and execs nothing but WebKit's
+# own helpers.  Granting the same to /usr/bin/python3 would hand it to every
+# Python program on the machine.
+#
+# Install:
+#     sudo cp packaging/apparmor/md-diff-view /etc/apparmor.d/md-diff-view
+#     sudo apparmor_parser -r /etc/apparmor.d/md-diff-view
+#
+# Then drop --no-sandbox from the launchers in scripts/.
+#
+# NOTE on the attachment path: whoever can write to it gets the grant.  On a
+# shared machine, install the binary somewhere only root can write (the
+# /usr/local/bin arm below) and delete the home-directory arm.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile md-diff-view /{usr/local/bin,home/*/Git/md-diff/viewer}/md-diff-view flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/md-diff-view>
+}

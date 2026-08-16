@@ -30,8 +30,16 @@ Opens the same rendered diff in a window, so there's no round-trip through
 a browser:
 
 ```
+make -C viewer          # once: builds the window
 md-diff-gui old.md new.md
 ```
+
+The window is `viewer/md-diff-view`, a small C program linking GTK4 and
+WebKit. It reads a rendered document on stdin and adds the chrome; pandoc,
+the diff and the stylesheet all stay in Python. It is a compiled binary
+rather than PyGObject so that an AppArmor profile has an executable to
+attach to — see [WebKit sandbox](#webkit-sandbox). `md-diff-gui` finds it in
+`viewer/`, on `PATH`, or wherever `MD_DIFF_VIEWER` points.
 
 | Key | Action |
 | --- | --- |
@@ -49,29 +57,58 @@ table row — placed where that change falls in the file, with the change you
 jumped to ringed in blue. The scrollbar thumb is drawn on top of it and stays
 visible rather than fading out; click or drag the strip to scroll.
 
+#### Untrusted documents
+
+This tool renders markdown out of git branches, so a document it is pointed
+at is written by whoever wrote the branch. Pandoc passes raw HTML in a
+markdown file straight through, which means a document can arrive carrying
+`<script>`. The viewer takes that as given:
+
+- **Page script does not run.** `enable-javascript-markup` is off, which
+  kills `<script>` and inline handlers while leaving the host's own
+  `evaluate_javascript` working — that is what drives the change stepper and
+  the overview map, so the feature survives the mitigation.
+- **The renderer has no network.** It runs in an ephemeral session with the
+  proxy pointed at a dead address. Rendering a local file needs no network,
+  and a document that asks for one is either tracking who opened it or
+  carrying something out.
+- **The document cannot navigate the window.** Links and popups are refused
+  after the initial load.
+
 #### WebKit sandbox
 
 WebKit renders page content inside a bubblewrap sandbox that needs
-unprivileged user namespaces. Ubuntu 24.04 and later restrict these by
-default (`kernel.apparmor_restrict_unprivileged_userns=1`), and WebKit
-responds by dumping core. The GUI checks for this at startup and explains the
-options rather than crashing:
+unprivileged user namespaces. Ubuntu 24.04 and later restrict these to
+executables an AppArmor profile grants them to
+(`kernel.apparmor_restrict_unprivileged_userns=1`), and WebKit responds to
+being refused by dumping core. The viewer settles the question at startup by
+running WebKit's own sandbox helper — `bwrap --unshare-user` — and explains
+the options rather than crashing. Asking bwrap, rather than reimplementing
+what it does, is what makes the answer match reality: bwrap inherits the
+viewer's AppArmor label, so the probe accounts for the profile, which the
+global sysctl cannot. `md-diff-view --check-sandbox` reports the same thing
+on demand, along with the label in force.
+
+The recommended fix is the profile shipped in `packaging/apparmor/`, which
+grants the permission to that one binary:
 
 ```
-md-diff-gui old.md new.md --no-sandbox
+sudo cp packaging/apparmor/md-diff-view /etc/apparmor.d/md-diff-view
+sudo apparmor_parser -r /etc/apparmor.d/md-diff-view
 ```
 
-`--no-sandbox` is scoped to this tool and needs no root. The pages rendered
-come from local files with no network access, so the exposure is small — but
-pandoc passes raw HTML in a markdown file straight through, so a document
-from a branch you don't trust could run scripts in an unsandboxed renderer.
-The alternative is restoring user namespaces machine-wide with
-`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, which keeps
-the sandbox but drops a system-wide hardening measure.
+Like Ubuntu's own profiles for Firefox and Brave it imposes no confinement
+of its own; it exists to name the binary and grant `userns`. Whoever can
+write to the attachment path gets the grant, so on a shared machine install
+the binary somewhere only root can write.
 
-A per-application AppArmor profile is not a practical third option: it would
-attach to the Python interpreter rather than to this script, granting
-`userns` to every Python process on the system.
+Failing that, `--no-sandbox` runs without the sandbox. It needs no root and
+is scoped to this tool, but it removes the containment that matters when a
+document reaches a bug in the renderer rather than merely running script:
+inside the sandbox that costs an attacker a process in an empty cell,
+without it they have your user account. The third option,
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, restores
+the sandbox everywhere at the cost of a system-wide hardening measure.
 
 ### git difftool
 
@@ -166,20 +203,15 @@ Handles complex box-drawing diagrams including:
 - [pandoc](https://pandoc.org/) (external)
 - [lxml](https://lxml.de/) (installed automatically via pip)
 
-The GUI and `md-view` additionally need GTK4 and WebKit, via the system
-PyGObject:
+Nothing above is needed for the window itself: the Python package never
+imports GTK. Building `viewer/md-diff-view` needs a C compiler and the GTK4
+and WebKit development packages:
 
 ```
-sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0
+sudo apt install build-essential libgtk-4-dev libwebkitgtk-6.0-dev
+make -C viewer
 ```
 
-PyGObject is not pip-installable in practice, so a virtualenv must be
-created with access to system packages:
-
-```
-python3 -m venv --system-site-packages .venv
-```
-
-`md-rich-diff` and `ascii-table` have no such constraint — a plain venv is
-fine if you only want the CLI. `md-view --output` also works there: it writes
-the HTML without opening a window.
+A plain virtualenv is fine — there is no PyGObject to reach around, so
+`--system-site-packages` is not required. `md-rich-diff`, `ascii-table` and
+`md-view --output` don't need the viewer at all; they only write HTML.

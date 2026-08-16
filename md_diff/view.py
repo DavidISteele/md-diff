@@ -18,7 +18,7 @@ import tempfile
 from pathlib import Path
 
 from md_diff.ascii_table import convert_ascii_tables
-from md_diff.gui import NAV_CSS, check_sandbox, show_document
+from md_diff.gui import NAV_CSS, show_document
 from md_diff.rich_diff import CSS
 
 # Rules that only apply to a document pandoc built from its own template.
@@ -118,12 +118,10 @@ def main():
         print(f"Written to {args.output}")
         return 0
 
-    if not check_sandbox(args.no_sandbox, "md-view"):
-        return 1
-
     document = render_document(args.file, toc=args.toc, extra_css=NAV_CSS)
     return show_document(document, args.file.name, args.file.name,
-                         str(args.file.resolve().parent), navigation=False)
+                         str(args.file.resolve().parent), navigation=False,
+                         no_sandbox=args.no_sandbox)
 
 
 if __name__ == "__main__":
