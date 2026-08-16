@@ -296,7 +296,7 @@ Two ways forward:
 
   1. Run this tool without the sandbox (no root, affects nothing else):
 
-         md-diff-gui ... --no-sandbox
+         {command} ... --no-sandbox
 
   2. Re-enable unprivileged user namespaces for the whole machine:
 
@@ -338,6 +338,26 @@ def userns_restricted() -> str | None:
     return None
 
 
+def check_sandbox(no_sandbox: bool, command: str) -> bool:
+    """Report whether WebKit can start here, disabling its sandbox if asked.
+
+    Returns False after explaining the options, so the caller can exit
+    rather than let the web process dump core.  `command` names the tool
+    in that explanation, since either entry point can land here.
+    """
+    reason = userns_restricted()
+    if reason and not no_sandbox:
+        print(SANDBOX_HELP.format(reason=reason, command=command),
+              file=sys.stderr)
+        return False
+    if no_sandbox:
+        # Must be set before WebKit spawns its web process.
+        os.environ[SANDBOX_ENV] = "1"
+        print("Warning: running WebKit without its content sandbox",
+              file=sys.stderr)
+    return True
+
+
 def is_markdown(path: Path, label: str | None = None) -> bool:
     """True if this looks like a markdown file.
 
@@ -361,31 +381,37 @@ def run_fallback(command: str, old: Path, new: Path) -> int:
     return subprocess.call([exe, str(old), str(new)])
 
 
-def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
-    """Open the rendered diff in a window. Returns a process exit code."""
+def show_document(document: str, title: str, primary: str, secondary: str,
+                  navigation: bool = True) -> int:
+    """Open an HTML document in the window. Returns a process exit code.
+
+    `navigation` adds the change stepper -- the header buttons, the counter
+    and the n/p keys.  A single rendered file has nothing to step through,
+    so md-view turns it off; the rest of the window, the scrollbar map
+    included, is the same either way.
+    """
     Gtk, WebKit, Gio, Gdk, GLib, Pango = _require_gtk()
 
-    title = f"{label_old} → {label_new}"
-    document = build_document(diff_files(old, new), title, extra_css=NAV_CSS)
-
-    class DiffWindow(Gtk.ApplicationWindow):
+    class DocumentWindow(Gtk.ApplicationWindow):
         def __init__(self, app):
             super().__init__(application=app, title=title,
                              default_width=1100, default_height=850)
 
-            self.counter = Gtk.Label(label="…")
-            self.counter.add_css_class("dim-label")
+            self.counter = None
 
             header = Gtk.HeaderBar()
-            header.set_title_widget(self.build_title(label_old, label_new))
-            for icon, delta, tip in (
-                ("go-up-symbolic", -1, "Previous change (p / Shift+Tab / Alt+Up)"),
-                ("go-down-symbolic", 1, "Next change (n / Tab / Alt+Down)"),
-            ):
-                button = Gtk.Button(icon_name=icon, tooltip_text=tip)
-                button.connect("clicked", lambda _b, d=delta: self.navigate(d))
-                header.pack_start(button)
-            header.pack_end(self.counter)
+            header.set_title_widget(self.build_title(primary, secondary))
+            if navigation:
+                self.counter = Gtk.Label(label="…")
+                self.counter.add_css_class("dim-label")
+                for icon, delta, tip in (
+                    ("go-up-symbolic", -1, "Previous change (p / Shift+Tab / Alt+Up)"),
+                    ("go-down-symbolic", 1, "Next change (n / Tab / Alt+Down)"),
+                ):
+                    button = Gtk.Button(icon_name=icon, tooltip_text=tip)
+                    button.connect("clicked", lambda _b, d=delta: self.navigate(d))
+                    header.pack_start(button)
+                header.pack_end(self.counter)
             self.set_titlebar(header)
 
             self.webview = WebKit.WebView()
@@ -404,17 +430,17 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
             self.add_controller(keys)
 
         @staticmethod
-        def build_title(label_old: str, label_new: str) -> "Gtk.Widget":
+        def build_title(primary: str, secondary: str) -> "Gtk.Widget":
             """Two-line header title (GTK4 has no Adwaita WindowTitle)."""
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
                           valign=Gtk.Align.CENTER)
-            primary = Gtk.Label(label=label_new, ellipsize=Pango.EllipsizeMode.END)
-            primary.add_css_class("title")
-            secondary = Gtk.Label(label=f"was: {label_old}", ellipsize=Pango.EllipsizeMode.END)
-            secondary.add_css_class("subtitle")
-            secondary.add_css_class("dim-label")
-            box.append(primary)
-            box.append(secondary)
+            top = Gtk.Label(label=primary, ellipsize=Pango.EllipsizeMode.END)
+            top.add_css_class("title")
+            bottom = Gtk.Label(label=secondary, ellipsize=Pango.EllipsizeMode.END)
+            bottom.add_css_class("subtitle")
+            bottom.add_css_class("dim-label")
+            box.append(top)
+            box.append(bottom)
             return box
 
         # --- JavaScript bridge ---
@@ -431,13 +457,15 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
                 value = webview.evaluate_javascript_finish(result)
             except GLib.Error:
                 return
-            if value is not None and value.is_string():
+            if self.counter is not None and value is not None and value.is_string():
                 self.counter.set_label(value.to_string())
 
         def navigate(self, delta: int) -> None:
             self.run_js(f"go({delta})")
 
         def on_load_changed(self, _webview, event) -> None:
+            # Called even without the stepper: the first evaluation is what
+            # builds the scrollbar map.
             if event == WebKit.LoadEvent.FINISHED:
                 self.run_js("label()")
 
@@ -451,9 +479,11 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
 
             if name in ("Escape", "q") or (ctrl and name == "w"):
                 self.close()
-            elif name == "n" or (name == "Tab" and not shift) or (alt and name == "Down"):
+            elif navigation and (name == "n" or (name == "Tab" and not shift)
+                                 or (alt and name == "Down")):
                 self.navigate(1)
-            elif name == "p" or name == "ISO_Left_Tab" or (alt and name == "Up"):
+            elif navigation and (name == "p" or name == "ISO_Left_Tab"
+                                 or (alt and name == "Up")):
                 self.navigate(-1)
             elif ctrl and name in ("plus", "equal", "KP_Add"):
                 self.webview.set_zoom_level(self.webview.get_zoom_level() * 1.1)
@@ -465,16 +495,23 @@ def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
                 return False
             return True
 
-    class DiffApp(Gtk.Application):
+    class DocumentApp(Gtk.Application):
         def __init__(self):
             # NON_UNIQUE: git difftool invokes us once per file and waits for
             # each to exit. Sharing one instance would let later invocations
             # return immediately and break that sequencing.
             super().__init__(application_id="uk.co.dnorth.md-diff",
                              flags=Gio.ApplicationFlags.NON_UNIQUE)
-            self.connect("activate", lambda app: DiffWindow(app).present())
+            self.connect("activate", lambda app: DocumentWindow(app).present())
 
-    return DiffApp().run([])
+    return DocumentApp().run([])
+
+
+def show_diff(old: Path, new: Path, label_old: str, label_new: str) -> int:
+    """Open the rendered diff in a window. Returns a process exit code."""
+    title = f"{label_old} → {label_new}"
+    document = build_document(diff_files(old, new), title, extra_css=NAV_CSS)
+    return show_document(document, title, label_new, f"was: {label_old}")
 
 
 DIFFTOOL_CMD = ('md-diff-gui "$LOCAL" "$REMOTE" '
@@ -557,15 +594,8 @@ def main():
               file=sys.stderr)
         return 1
 
-    reason = userns_restricted()
-    if reason and not args.no_sandbox:
-        print(SANDBOX_HELP.format(reason=reason), file=sys.stderr)
+    if not check_sandbox(args.no_sandbox, "md-diff-gui"):
         return 1
-    if args.no_sandbox:
-        # Must be set before WebKit spawns its web process.
-        os.environ[SANDBOX_ENV] = "1"
-        print("Warning: running WebKit without its content sandbox",
-              file=sys.stderr)
 
     return show_diff(args.old, args.new, label_old, label_new)
 

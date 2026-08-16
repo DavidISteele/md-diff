@@ -9,3 +9,4 @@ __pycache__/
 .\#*
 *.egg-info/
 test-data/
+build/

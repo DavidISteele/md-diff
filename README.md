@@ -96,6 +96,26 @@ git config --global diff.tool md-diff
 The `$BASE` labels make the header bar show the repo-relative path rather
 than git's temporary checkout filenames.
 
+### Viewing a single file
+
+The same renderer and the same window, without the diff:
+
+```
+md-view file.md [--toc] [-o output.html]
+```
+
+`-o` writes standalone HTML and stops; otherwise the file opens in the GUI
+window, with `Ctrl` `+` / `-` / `0` and `q` / `Esc` / `Ctrl+W` as above. There
+is nothing to step through in a single file, so the change stepper is absent —
+the overview strip stays, as a scrollbar that doesn't fade. `--no-sandbox`
+applies here too.
+
+Pandoc builds the document here rather than a fragment, which is what supplies
+`--toc` and the embedded resources: the window loads the HTML as a string, so
+relative images have no base URI to resolve against and must be inlined. Both
+paths share one stylesheet, so a document reads the same viewed as it does
+diffed — ASCII diagrams included.
+
 ### ASCII tables
 
 The ASCII table converter is also available standalone:
@@ -146,7 +166,8 @@ Handles complex box-drawing diagrams including:
 - [pandoc](https://pandoc.org/) (external)
 - [lxml](https://lxml.de/) (installed automatically via pip)
 
-The GUI additionally needs GTK4 and WebKit, via the system PyGObject:
+The GUI and `md-view` additionally need GTK4 and WebKit, via the system
+PyGObject:
 
 ```
 sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-webkit-6.0
@@ -159,5 +180,6 @@ created with access to system packages:
 python3 -m venv --system-site-packages .venv
 ```
 
-The CLI has no such constraint — a plain venv is fine if you don't want the
-GUI.
+`md-rich-diff` and `ascii-table` have no such constraint — a plain venv is
+fine if you only want the CLI. `md-view --output` also works there: it writes
+the HTML without opening a window.
