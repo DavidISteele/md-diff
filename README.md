@@ -153,6 +153,33 @@ relative images have no base URI to resolve against and must be inlined. Both
 paths share one stylesheet, so a document reads the same viewed as it does
 diffed — ASCII diagrams included.
 
+### Desktop entry
+
+```
+packaging/install-desktop.sh
+```
+
+Installs `Markdown Viewer` into the application menu and registers it as a
+handler for `text/markdown`, so a `.md` file opens in the window from the
+file manager. Everything lands under `$XDG_DATA_HOME` — no root, nothing
+system-wide. The entry, its icon and the window's GTK application id all
+share the name `org.user.local.md-diff-view`, which is what lets the shell
+pair the running window with the launcher rather than showing it unnamed;
+`StartupWMClass` covers X11, where the match is by `WM_CLASS` instead.
+
+`Exec` is rewritten to an absolute path at install time, since a desktop
+session's `PATH` is not the shell's and rarely includes `~/bin`. Launched
+from the menu with no file, `md-view` opens a file chooser (`kdialog` or
+`zenity`, whichever is present) rather than exiting invisibly.
+
+Registering a handler can change which application opens markdown by
+default when nothing was set explicitly. Pin whichever you want:
+
+```
+xdg-mime default org.user.local.md-diff-view.desktop text/markdown
+xdg-mime query default text/markdown
+```
+
 ### ASCII tables
 
 The ASCII table converter is also available standalone:

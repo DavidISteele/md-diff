@@ -27,6 +27,11 @@
 
 #define SANDBOX_ENV "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"
 
+/* Shared by the GTK application, the desktop entry's filename and the icon
+   installed into the hicolor theme.  The three matching is what lets a
+   desktop pair the window with its launcher. */
+#define APP_ID "org.user.local.md-diff-view"
+
 static const char SANDBOX_HELP[] =
 "Error: WebKit cannot start its sandbox on this system.\n"
 "Reason: unprivileged user namespaces are unavailable to this program.\n"
@@ -382,6 +387,13 @@ static void on_activate(GtkApplication *app, gpointer data)
     Viewer *viewer = data;
     const char *title = opt_title != NULL ? opt_title : "md-diff";
 
+    /* X11 draws the titlebar and taskbar icon from the _NET_WM_ICON pixmaps
+       on the window, and GTK4 only attaches them when the icon is named --
+       the application id alone leaves the window with the generic default.
+       The name resolves through the icon theme to the SVG that
+       packaging/install-desktop.sh installs. */
+    gtk_window_set_default_icon_name(APP_ID);
+
     GtkWidget *window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), title);
     gtk_window_set_default_size(GTK_WINDOW(window), 1100, 850);
@@ -463,7 +475,7 @@ int main(int argc, char **argv)
     /* NON_UNIQUE: git difftool invokes us once per file and waits for each to
        exit.  Sharing one instance would let later invocations return
        immediately and break that sequencing. */
-    GtkApplication *app = gtk_application_new("uk.co.dnorth.md-diff-view",
+    GtkApplication *app = gtk_application_new(APP_ID,
                                               G_APPLICATION_NON_UNIQUE);
     g_signal_connect(app, "activate", G_CALLBACK(on_activate), &viewer);
     int status = g_application_run(G_APPLICATION(app), 0, NULL);

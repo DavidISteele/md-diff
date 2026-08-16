@@ -11,6 +11,7 @@ HTML as a string, with no base URI for relative images to resolve against.
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -90,11 +91,38 @@ def render_document(path: Path, toc: bool = False, toc_depth: int = 3,
     return result.stdout
 
 
+def choose_file() -> Path | None:
+    """Ask the desktop for a file, for a launcher that passed none.
+
+    The desktop entry is in the application menu, where it is launched with
+    no argument at all; a usage message on stderr would be invisible there.
+    """
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return None
+
+    for command in (
+        ["kdialog", "--getopenfilename", ".",
+         "Markdown (*.md *.markdown *.mdown *.mkd)"],
+        ["zenity", "--file-selection", "--title=Open markdown",
+         "--file-filter=Markdown | *.md *.markdown *.mdown *.mkd"],
+    ):
+        exe = shutil.which(command[0])
+        if exe is None:
+            continue
+        result = subprocess.run([exe, *command[1:]], capture_output=True,
+                                text=True)
+        chosen = result.stdout.strip()
+        return Path(chosen) if result.returncode == 0 and chosen else None
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("file", type=Path, help="Markdown file to render")
+    parser.add_argument("file", type=Path, nargs="?",
+                        help="Markdown file to render "
+                             "(without one, a file chooser opens)")
     parser.add_argument("-o", "--output", type=Path, default=None,
                         help="Write the HTML to a file instead of opening it")
     parser.add_argument("--toc", action="store_true",
@@ -103,6 +131,12 @@ def main():
                         help="Run WebKit without its content sandbox, for "
                              "systems that block unprivileged user namespaces")
     args = parser.parse_args()
+
+    if args.file is None:
+        args.file = choose_file()
+        if args.file is None:
+            print("md-view: no file given", file=sys.stderr)
+            return 1
 
     if not args.file.exists():
         print(f"Error: {args.file} not found", file=sys.stderr)

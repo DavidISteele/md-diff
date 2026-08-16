@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Markdown Viewer
+GenericName=Rendered Markdown Viewer
+Comment=Render a markdown file and read it in a window
+Exec=md-view %f
+TryExec=md-view
+Icon=org.user.local.md-diff-view
+Terminal=false
+StartupNotify=true
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;md;preview;render;diff;
+# The window's GTK application id, and its WM_CLASS on X11. Both match this
+# file's name, which is what lets the shell pair the window with this entry
+# rather than showing it as an unnamed application.
+StartupWMClass=md-diff-view
