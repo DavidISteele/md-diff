@@ -77,6 +77,58 @@ the table it produces holds a fraction of the words:
                  - any browser
 ```
 
+## Gallery
+
+Drawn with the same characters, and none of them a table.  Not one of
+these may be converted, and not one may lose a word.
+
+A state machine, rounded:
+
+```
+        ╭──────────╮   grant    ╭──────────╮
+        │  queued  │───────────▶│  active  │
+        ╰────┬─────╯            ╰─────┬────╯
+             │ expire                 │ release
+             ▼                         ▼
+        ╭──────────╮            ╭──────────╮
+        │  reaped  │◀───────────│  closed  │
+        ╰──────────╯   sweep    ╰──────────╯
+```
+
+A sequence, where the verticals are lifelines and no box closes at all —
+the extractor is blind to this one, so the text-loss guard is what has to
+catch it:
+
+```
+  client         broker          adapter
+    │              │                │
+    │─ /lease ────▶│                │
+    │              │─ can_fit? ────▶│
+    │              │◀── 6.2 GB ─────│
+    │◀── grant ────│                │
+    │              │                │
+```
+
+A legend, double-ruled, with a box inside a box:
+
+```
+╔════════════════════════════════════════╗
+║  legend                                ║
+║    ┌────────┐  a box is a component    ║
+║    │ shape  │                          ║
+║    └────────┘  ─────▶ is a data flow   ║
+╚════════════════════════════════════════╝
+```
+
+The same thing drawn in ASCII, which the box characters never match:
+
+```
++---------------+        +---------------+
+|  fixture      | ---->  |  renderer     |
+|  (v1 / v2)    |        |  (pandoc)     |
++---------------+        +---------------+
+```
+
 ## Column widths
 
 A first column of keys sits beside a column of prose.  The keys must not

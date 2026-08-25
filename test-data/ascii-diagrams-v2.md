@@ -86,6 +86,60 @@ the table it produces holds a fraction of the words:
                  - the difftool
 ```
 
+## Gallery
+
+Drawn with the same characters, and none of them a table.  Not one of
+these may be converted, and not one may lose a word.
+
+A state machine, rounded:
+
+```
+        ╭──────────╮   grant    ╭──────────╮
+        │  queued  │───────────▶│  active  │
+        ╰────┬─────╯            ╰─────┬────╯
+             │ timeout                │ release
+             ▼                         ▼
+        ╭──────────╮            ╭──────────╮
+        │  reaped  │◀───────────│  closed  │
+        ╰──────────╯   reaper   ╰──────────╯
+```
+
+A sequence, where the verticals are lifelines and no box closes at all —
+the extractor is blind to this one, so the text-loss guard is what has to
+catch it:
+
+```
+  client         broker          adapter
+    │              │                │
+    │─ /lease ────▶│                │
+    │              │─ can_fit? ────▶│
+    │              │◀── 6.2 GB ─────│
+    │◀── grant ────│                │
+    │              │─ loaded ──────▶│
+    │              │                │
+```
+
+A legend, double-ruled, with a box inside a box:
+
+```
+╔════════════════════════════════════════╗
+║  legend                                ║
+║    ┌────────┐  a box is a component    ║
+║    │ shape  │                          ║
+║    └────────┘  ─────▶ is a data flow   ║
+║                ◀╌╌╌╌╌ is a retry      ║
+╚════════════════════════════════════════╝
+```
+
+The same thing drawn in ASCII, which the box characters never match:
+
+```
++---------------+        +---------------+
+|  fixture      | ---->  |  renderer     |
+|  (v1 / v2)    |        |  (pandoc 3)   |
++---------------+        +---------------+
+```
+
 ## Column widths
 
 A first column of keys sits beside a column of prose.  The keys must not
