@@ -8,11 +8,38 @@ with inline additions and deletions highlighted in context.
 
 ## Installation
 
+Everything comes from distribution packages. On Debian or Ubuntu:
+
 ```
-pip install .
+sudo apt install pandoc python3-lxml                                 # renderer and diff
+sudo apt install build-essential libgtk-4-dev libwebkitgtk-6.0-dev   # the window
+make -C viewer
 ```
 
-Requires [pandoc](https://pandoc.org/) to be installed separately.
+lxml is the only third-party import and the rest of the package is the
+standard library, so the system `python3` is enough — there is nothing here
+worth building a virtualenv for. Run it out of the checkout:
+
+```
+PYTHONPATH=/path/to/md-diff python3 -m md_diff.rich_diff old.md new.md
+```
+
+`scripts/md-diff.sh` and `scripts/md-view.sh` wrap that; symlink whichever
+you use into `~/bin`.
+
+`pip install .` is the alternative, and all it adds is the four command names
+on `PATH`. Debian 12 and Ubuntu 24.04 mark the system python as externally
+managed (PEP 668), so it has to go into a virtualenv; a plain one is fine, as
+there is no PyGObject to reach around and `--system-site-packages` is not
+required. The usage below names the installed commands — each is also a
+module, so either form works:
+
+| Installed | Out of the checkout |
+| --- | --- |
+| `md-rich-diff` | `python3 -m md_diff.rich_diff` |
+| `md-diff-gui` | `python3 -m md_diff.gui` |
+| `md-view` | `python3 -m md_diff.view` |
+| `ascii-table` | `python3 -m md_diff.ascii_table` |
 
 ## Usage
 
@@ -133,6 +160,16 @@ git config --global diff.tool md-diff
 The `$BASE` labels make the header bar show the repo-relative path rather
 than git's temporary checkout filenames.
 
+The generated command names `md-diff-gui`, so the config is only good where
+that is on `PATH` — installed, in other words. Working out of the checkout,
+write it against the wrapper instead, which takes git's three arguments as
+they come:
+
+```
+git config --global difftool.md-diff.cmd '~/bin/md-diff.sh "$LOCAL" "$REMOTE" "$BASE"'
+git config --global diff.tool md-diff
+```
+
 ### Viewing a single file
 
 The same renderer and the same window, without the diff:
@@ -227,18 +264,17 @@ Handles complex box-drawing diagrams including:
 ## Dependencies
 
 - Python 3.10+
-- [pandoc](https://pandoc.org/) (external)
-- [lxml](https://lxml.de/) (installed automatically via pip)
+- [pandoc](https://pandoc.org/) — `pandoc`
+- [lxml](https://lxml.de/) — `python3-lxml`, and the only third-party import
 
 Nothing above is needed for the window itself: the Python package never
 imports GTK. Building `viewer/md-diff-view` needs a C compiler and the GTK4
-and WebKit development packages:
+and WebKit development packages, which bring the runtime libraries with them:
 
-```
-sudo apt install build-essential libgtk-4-dev libwebkitgtk-6.0-dev
-make -C viewer
-```
+- `build-essential`
+- `libgtk-4-dev`
+- `libwebkitgtk-6.0-dev`
 
-A plain virtualenv is fine — there is no PyGObject to reach around, so
-`--system-site-packages` is not required. `md-rich-diff`, `ascii-table` and
-`md-view --output` don't need the viewer at all; they only write HTML.
+The split runs the other way too. `md-rich-diff`, `ascii-table` and
+`md-view --output` only write HTML, so a machine that never opens the window
+can skip the GTK packages and the `make` entirely.

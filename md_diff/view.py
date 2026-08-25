@@ -59,6 +59,23 @@ table {
 """
 
 
+def embed_flag() -> str:
+    """Pick the flag that inlines images and other resources.
+
+    --embed-resources arrived in pandoc 2.19, renaming --self-contained,
+    which is still accepted (deprecated) by later versions.  Debian
+    bookworm ships 2.17, so ask the installed pandoc which one it knows
+    rather than assuming.
+    """
+    try:
+        version = subprocess.run(["pandoc", "--version"], capture_output=True,
+                                 text=True, check=True).stdout.split()[1]
+        release = tuple(int(part) for part in version.split(".")[:2])
+    except (subprocess.CalledProcessError, OSError, IndexError, ValueError):
+        return "--self-contained"
+    return "--embed-resources" if release >= (2, 19) else "--self-contained"
+
+
 def render_document(path: Path, toc: bool = False, toc_depth: int = 3,
                     extra_css: str = "") -> str:
     """Render a markdown file to a standalone HTML document.
@@ -77,7 +94,7 @@ def render_document(path: Path, toc: bool = False, toc_depth: int = 3,
             "--from=gfm+smart",
             "--to=html5",
             "--standalone",
-            "--embed-resources",
+            embed_flag(),
             f"--include-in-header={header}",
             # Markdown arrives on stdin, so relative links to images and
             # other resources resolve against the cwd unless told better.
