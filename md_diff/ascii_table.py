@@ -18,10 +18,33 @@ BOX_CHARS = set("│┌┐└┘├┤┬┴┼─━║╔╗╚╝╠╣╦╩
 SEPARATOR_CHARS = set("─━┌┐└┘├┤┬┴┼╔╗╚╝╠╣╦╩╬ ")
 
 
+# A file tree hangs "|-- name" branches off a spine of "|" that marks
+# depth.  It is drawn with the same characters as a table and is not one:
+# the spine is not a column boundary, and nothing crosses it.
+TREE_BRANCH_RE = re.compile(r"^[\u2502 ]*[\u251c\u2514]\u2500\u2500 ")
+
+
+def is_tree_diagram(lines: list[str]) -> bool:
+    """Check if a block is a file tree rather than a table.
+
+    A tree whose entries all fit one line has a single │ column and
+    fails the two-column gate in ascii_to_html_table anyway.  One entry
+    with a continuation line indented under a nested branch adds a
+    second │ column, which is enough to get past that gate and parse to
+    no rows at all -- model-hub's design.md Module Layout tree, once a
+    lease.py description ran to three lines.
+    """
+    branches = sum(1 for line in lines if TREE_BRANCH_RE.match(line))
+    content = sum(1 for line in lines if line.strip())
+    return content > 0 and branches >= content * 0.5
+
+
 def is_box_drawing_block(code: str) -> bool:
     """Check if a code block contains box-drawing art."""
     lines = code.strip().split("\n")
     if len(lines) < 3:
+        return False
+    if is_tree_diagram(lines):
         return False
     box_lines = sum(1 for line in lines if any(c in BOX_CHARS for c in line))
     return box_lines >= len(lines) * 0.6
@@ -419,6 +442,13 @@ def ascii_to_html_table(code: str) -> str:
                 html_parts.append(f"    <td{attrs}>{cell_esc}</td>")
             html_parts.append("  </tr>")
         html_parts.append("</tbody>")
+
+    # Box-drawn, but no section parsed into rows.  The empty <table>
+    # built so far is a truthy string, and convert_ascii_tables falls
+    # back to the original block only on None -- returning it replaces
+    # the diagram with an empty box.  Leave the block alone instead.
+    if "  <tr>" not in html_parts:
+        return None
 
     html_parts.append("</table>")
     return "\n".join(html_parts)

@@ -1,0 +1,61 @@
+# Diagram Notes
+
+Code blocks drawn with box characters are pre-processed before rendering:
+some of them become HTML tables and the rest stay code blocks.  This pair
+pins down which is which, and holds the shapes that got it wrong.
+
+## File tree
+
+A tree is drawn with the same characters as a table and is not one.  The
+`│` spine marks depth rather than a column boundary, and nothing crosses
+it.  Every entry here fits on one line, so there is a single spine:
+
+```
+src/renderer/
+├── parse.py                  Markdown to blocks
+├── layout/
+│   ├── blocks.py             Paragraph and list geometry
+│   └── tables.py             Column widths
+├── emit.py                   HTML writer
+└── cli.py                    Entry point
+```
+
+## Panel diagram
+
+A real box-drawing table: framed, with a spanning left column and inner
+separators dividing the cells on the right.  This one must convert.
+
+```
+┌────────────────┬─────────────────────────────────────┐
+│                │ Stage        │ Cost                 │
+│  PIPELINE      │──────────────│──────────────────────│
+│                │ parse        │ one pass             │
+│  [source.md]   │ layout       │ two passes           │
+│                │ emit         │ one pass             │
+├────────────────┼─────────────────────────────────────┤
+│ NOTES          │  ▸ Widths come from the source      │
+│                │  ▸ Emission is streaming            │
+└────────────────┴─────────────────────────────────────┘
+```
+
+## Flow diagram
+
+Box-drawn, but nothing lines up into columns — one vertical rule is not a
+table, and this stays a code block:
+
+```
+source.md ──▶ parse ──▶ layout ──▶ emit ──▶ out.html
+                            │
+                            └──▶ warnings.log
+```
+
+## Column widths
+
+A first column of keys sits beside a column of prose.  The keys must not
+break at their hyphens, and the table must not outgrow the page:
+
+| ID | Behaviour |
+| --- | --- |
+| DG-1 | Box-drawing code blocks are converted to tables where they parse. |
+| DG-2.1 | A block that parses to no rows is left as a code block. |
+| DG-2.2 | A file tree is never a candidate. |
