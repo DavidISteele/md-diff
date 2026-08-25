@@ -72,14 +72,19 @@ th {
    hyphen is a line-break opportunity, so the column's minimum content
    width is "1.3f", not "FR-1.3f"; auto layout hands a column facing
    long prose exactly that minimum, and every ID wraps onto two lines.
-   One line per key sizes the column to its longest key instead.  The
-   cost is that a first column holding sentences rather than keys now
-   widens the table past the page -- an over-wide table rather than a
-   shredded one, and the docs this renders key their tables. Converted
-   ASCII tables are exempt: their first column carries diagram prose. */
+   keep-all suppresses the wrap opportunities inside a word -- the
+   hyphen -- and leaves spaces breaking as usual, so a column of keys
+   sizes to its longest key while a first column holding sentences
+   still wraps.  Pinning the column to one line with nowrap did the
+   first half and lost the second: measured in a headless browser on
+   model-hub's docs, the key column is 83px under either rule, but a
+   table whose first cell is a 146-character sentence goes 1200px wide
+   under nowrap -- past the page -- against 1100px under keep-all.
+   Converted ASCII tables stay exempt: their first column carries
+   diagram prose, whose hyphen runs keep-all would refuse to break. */
 table:not(.ascii-converted) th:first-child,
 table:not(.ascii-converted) td:first-child {
-    white-space: nowrap;
+    word-break: keep-all;
 }
 
 /* Row banding -- a wide table with tall cells is hard to read across
