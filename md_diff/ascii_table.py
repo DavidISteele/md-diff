@@ -325,6 +325,40 @@ def detect_section_clusters(section_lines: list[str],
             if hits[ci] >= threshold]
 
 
+# Glyphs that draw the diagram rather than say anything: box rules, the
+# arrows joining them, and the bullet markers format_cell_lines turns into
+# list items.  What is left is the text a reader would lose.
+DECORATION = BOX_CHARS | set("\u25bc\u25b2\u25c0\u25b6\u2192\u2190\u2193\u2191"
+                             "\u25b8\u25b9\u25ba\u25bb\u25cf\u25cb\u2022\u00b7")
+WORD_RE = re.compile(r"[^\s]+")
+
+
+def text_tokens(text: str) -> Counter:
+    """The words in a block, ignoring everything that only draws it."""
+    plain = "".join(" " if c in DECORATION else c for c in text)
+    return Counter(w for w in WORD_RE.findall(plain))
+
+
+def preserves_text(code: str, table_html: str) -> bool:
+    """Check that converting kept every word the block started with.
+
+    The parser reads a grid: verticals are column boundaries and the text
+    between them is a cell.  A diagram of nested boxes and arrows has
+    verticals that mean nothing of the sort, and the same code walks it
+    happily -- emitting a table that looks reasonable and quietly holds a
+    third of the words.  model-hub's design.md had two: the architecture
+    diagram kept 27 of 70 words, the /lease sequence 12 of 35.  Every
+    real grid table in the corpus keeps all of them, so any loss at all
+    means the block was not a grid, and it belongs in a code block where
+    it renders as drawn.
+    """
+    plain = re.sub(r"<[^>]+>", " ", table_html)
+    plain = (plain.replace("&lt;", "<").replace("&gt;", ">")
+             .replace("&quot;", '"').replace("&#39;", "'")
+             .replace("&amp;", "&"))
+    return not (text_tokens(code) - text_tokens(plain))
+
+
 def ascii_to_html_table(code: str) -> str:
     """Convert an ASCII box-drawing diagram to an HTML table."""
     lines = code.strip().split("\n")
@@ -451,7 +485,12 @@ def ascii_to_html_table(code: str) -> str:
         return None
 
     html_parts.append("</table>")
-    return "\n".join(html_parts)
+    table_html = "\n".join(html_parts)
+
+    if not preserves_text(code, table_html):
+        return None
+
+    return table_html
 
 
 def convert_ascii_tables(markdown: str) -> str:

@@ -49,6 +49,34 @@ source.md ──▶ parse ──▶ layout ──▶ emit ──▶ out.html
                             └──▶ warnings.log
 ```
 
+## Nested boxes
+
+Boxes inside a box, joined by arrows.  Every `│` here is a wall or a
+wire, not a column boundary, but the grid parser walks it happily — and
+the table it produces holds a fraction of the words:
+
+```
+┌──────────────────────────────────────────┐
+│  md-diff                                 │
+│                                          │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐  │
+│  │ renderer │  │ differ   │  │ viewer │  │
+│  │ (pandoc) │  │ (lxml)   │  │ (GTK)  │  │
+│  └────┬─────┘  └────┬─────┘  └───┬────┘  │
+│       │ html        │ tree       │ html  │
+│       ▼             ▼            ▼       │
+└───────┼─────────────┼────────────┼───────┘
+        └─────────────┴────────────┘
+                      │
+              ┌───────┴────────┐
+              │   out.html     │
+              └────────────────┘
+                      │
+                 ▼ opened by ▼
+                 - md-diff-view
+                 - any browser
+```
+
 ## Column widths
 
 A first column of keys sits beside a column of prose.  The keys must not
