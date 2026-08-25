@@ -44,9 +44,9 @@ Box-drawn, but nothing lines up into columns — one vertical rule is not a
 table, and this stays a code block:
 
 ```
-source.md ──▶ parse ──▶ layout ──▶ emit ──▶ out.html
+source.md ──▸ parse ──▸ layout ──▸ emit ──▸ out.html
                             │
-                            └──▶ warnings.log
+                            └──▸ warnings.log
 ```
 
 ## Nested boxes
@@ -64,7 +64,7 @@ the table it produces holds a fraction of the words:
 │  │ (pandoc) │  │ (lxml)   │  │ (GTK)  │  │
 │  └────┬─────┘  └────┬─────┘  └───┬────┘  │
 │       │ html        │ tree       │ html  │
-│       ▼             ▼            ▼       │
+│       ▾             ▾            ▾       │
 └───────┼─────────────┼────────────┼───────┘
         └─────────────┴────────────┘
                       │
@@ -72,7 +72,7 @@ the table it produces holds a fraction of the words:
               │   out.html     │
               └────────────────┘
                       │
-                 ▼ opened by ▼
+                 ▾ opened by ▾
                  - md-diff-view
                  - any browser
 ```
@@ -86,12 +86,12 @@ A state machine, rounded:
 
 ```
         ╭──────────╮   grant    ╭──────────╮
-        │  queued  │───────────▶│  active  │
+        │  queued  │───────────▸│  active  │
         ╰────┬─────╯            ╰─────┬────╯
              │ expire                 │ release
-             ▼                         ▼
+             ▾                        ▾
         ╭──────────╮            ╭──────────╮
-        │  reaped  │◀───────────│  closed  │
+        │  reaped  │◂───────────│  closed  │
         ╰──────────╯   sweep    ╰──────────╯
 ```
 
@@ -102,10 +102,10 @@ catch it:
 ```
   client         broker          adapter
     │              │                │
-    │─ /lease ────▶│                │
-    │              │─ can_fit? ────▶│
-    │              │◀── 6.2 GB ─────│
-    │◀── grant ────│                │
+    │─ /lease ────▸│                │
+    │              │─ can_fit? ────▸│
+    │              │◂── 6.2 GB ─────│
+    │◂── grant ────│                │
     │              │                │
 ```
 
@@ -116,7 +116,7 @@ A legend, double-ruled, with a box inside a box:
 ║  legend                                ║
 ║    ┌────────┐  a box is a component    ║
 ║    │ shape  │                          ║
-║    └────────┘  ─────▶ is a data flow   ║
+║    └────────┘  ─────▸ is a data flow   ║
 ╚════════════════════════════════════════╝
 ```
 

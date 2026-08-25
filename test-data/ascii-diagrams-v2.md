@@ -51,9 +51,9 @@ Box-drawn, but nothing lines up into columns — one vertical rule is not a
 table, and this stays a code block:
 
 ```
-source.md ──▶ parse ──▶ layout ──▶ trees ──▶ emit ──▶ out.html
+source.md ──▸ parse ──▸ layout ──▸ trees ──▸ emit ──▸ out.html
                                       │
-                                      └──▶ warnings.log
+                                      └──▸ warnings.log
 ```
 
 ## Nested boxes
@@ -72,7 +72,7 @@ the table it produces holds a fraction of the words:
 │  │          │  │          │  │ + nav  │  │
 │  └────┬─────┘  └────┬─────┘  └───┬────┘  │
 │       │ html        │ tree       │ html  │
-│       ▼             ▼            ▼       │
+│       ▾             ▾            ▾       │
 └───────┼─────────────┼────────────┼───────┘
         └─────────────┴────────────┘
                       │
@@ -80,7 +80,7 @@ the table it produces holds a fraction of the words:
               │  out.html (v2) │
               └────────────────┘
                       │
-                 ▼ opened by ▼
+                 ▾ opened by ▾
                  - md-diff-view
                  - any browser
                  - the difftool
@@ -95,12 +95,12 @@ A state machine, rounded:
 
 ```
         ╭──────────╮   grant    ╭──────────╮
-        │  queued  │───────────▶│  active  │
+        │  queued  │───────────▸│  active  │
         ╰────┬─────╯            ╰─────┬────╯
              │ timeout                │ release
-             ▼                         ▼
+             ▾                        ▾
         ╭──────────╮            ╭──────────╮
-        │  reaped  │◀───────────│  closed  │
+        │  reaped  │◂───────────│  closed  │
         ╰──────────╯   reaper   ╰──────────╯
 ```
 
@@ -111,11 +111,11 @@ catch it:
 ```
   client         broker          adapter
     │              │                │
-    │─ /lease ────▶│                │
-    │              │─ can_fit? ────▶│
-    │              │◀── 6.2 GB ─────│
-    │◀── grant ────│                │
-    │              │─ loaded ──────▶│
+    │─ /lease ────▸│                │
+    │              │─ can_fit? ────▸│
+    │              │◂── 6.2 GB ─────│
+    │◂── grant ────│                │
+    │              │─ loaded ──────▸│
     │              │                │
 ```
 
@@ -126,8 +126,8 @@ A legend, double-ruled, with a box inside a box:
 ║  legend                                ║
 ║    ┌────────┐  a box is a component    ║
 ║    │ shape  │                          ║
-║    └────────┘  ─────▶ is a data flow   ║
-║                ◀╌╌╌╌╌ is a retry      ║
+║    └────────┘  ─────▸ is a data flow   ║
+║                ◂╌╌╌╌╌ is a retry       ║
 ╚════════════════════════════════════════╝
 ```
 
