@@ -39,6 +39,125 @@ def is_tree_diagram(lines: list[str]) -> bool:
     return content > 0 and branches >= content * 0.5
 
 
+# The glyphs a wall can be made of: verticals, and the corners and
+# junctions where one starts, ends or is crossed.
+WALL_CHARS = set("\u2502\u2503\u2551\u254e\u250c\u2510\u2514\u2518"
+                 "\u251c\u2524\u253c\u252c\u2534"
+                 "\u2554\u2557\u255a\u255d\u2560\u2563\u256c\u2566\u2569")
+HORIZONTAL_FILL = set("\u2500\u2501\u2550")
+
+# How far a hand-drawn wall may drift between one row and the next, and
+# how many rows a run needs before it counts as a wall rather than a
+# connector.  The workbench spec's right frame wanders from column 70 to
+# 74 and its bottom section is drawn three columns short, which is what
+# sets the tolerance: at 2 that section breaks off as a wall of its own
+# and straightens to the wrong column, at 3 the frame comes back whole,
+# and 4 changes nothing further.
+WALL_WOBBLE = 3
+MIN_WALL = 3
+
+
+def trace_walls(rows: list[str], width: int) -> dict[tuple[int, int], int]:
+    """Map each wall glyph to the column its wall belongs in.
+
+    Walk down from every unvisited vertical, stepping to the nearest
+    vertical in the next row within WALL_WOBBLE.  The run that comes back
+    is one wall however much it wanders, and its modal position is where
+    it was meant to sit.
+
+    Tracing each wall is what keeps one box's edge off another's.
+    Snapping to columns the whole block agrees on is simpler and wrong:
+    at this tolerance it drags the "whisper" box in model-hub's
+    architecture diagram onto the broker box's wall three columns away,
+    and the box stops closing.
+    """
+    seen, runs = set(), []
+    for r in range(len(rows)):
+        for c in range(width):
+            if rows[r][c] not in WALL_CHARS or (r, c) in seen:
+                continue
+            run, row, col = [(r, c)], r, c
+            seen.add((r, c))
+            while row + 1 < len(rows):
+                near = [(abs(x - col), x)
+                        for x in range(max(0, col - WALL_WOBBLE),
+                                       min(width, col + WALL_WOBBLE + 1))
+                        if rows[row + 1][x] in WALL_CHARS
+                        and (row + 1, x) not in seen]
+                if not near:
+                    break
+                row, col = row + 1, min(near)[1]
+                run.append((row, col))
+                seen.add((row, col))
+            runs.append(run)
+
+    columns = {}
+    for run in runs:
+        if len(run) < MIN_WALL:
+            continue
+        target = Counter(c for _, c in run).most_common(1)[0][0]
+        for position in run:
+            columns[position] = target
+    return columns
+
+
+def fill_for(segment: str) -> str:
+    """What to pad a segment with: its own rule character, or a space."""
+    body = segment.strip()
+    if body and body[0] in HORIZONTAL_FILL and len(set(body)) == 1:
+        return body[0]
+    return " "
+
+
+def normalise_grid(code: str) -> str:
+    """Straighten a ragged diagram so every wall sits on one column.
+
+    Hand-drawn tables do not line up: in the workbench spec no two lines
+    are the same length and each column drifts by a character or three.
+    The parser tolerates that as it reads -- find_column_clusters chains
+    positions within 2 of each other, find_actual_vert re-searches within
+    1 of the cluster -- which finds cells but leaves the grid itself
+    ragged, so nothing needing exact geometry can be built on it.
+
+    Repair it once instead, by adjusting the padding rather than moving
+    the glyph: pad to push a wall right, trim spare spaces to pull it
+    left, and give up on the row rather than overwrite text.  Moving the
+    glyph needs the target to be empty, which one row of a wall is enough
+    to deny -- and then the whole wall stays crooked.
+    """
+    rows = code.strip("\n").split("\n")
+    width = max((len(row) for row in rows), default=0)
+    rows = [row.ljust(width) for row in rows]
+    columns = trace_walls(rows, width)
+
+    straightened = []
+    for r, row in enumerate(rows):
+        walls = sorted((c, columns[(r, c)])
+                       for c in range(width) if (r, c) in columns)
+        if not walls:
+            straightened.append(row)
+            continue
+        parts, read, cursor = [], 0, 0
+        for position, target in walls:
+            segment = row[read:position]
+            want = target - cursor
+            if want > len(segment):
+                segment += fill_for(segment) * (want - len(segment))
+            elif want < len(segment):
+                spare = len(segment) - want
+                if not segment[len(segment) - spare:].strip():
+                    segment = segment[:len(segment) - spare]
+            parts.append(segment)
+            parts.append(row[position])
+            cursor = sum(len(part) for part in parts)
+            read = position + 1
+        parts.append(row[read:])
+        straightened.append("".join(parts))
+
+    width = max((len(row) for row in straightened), default=0)
+    return "\n".join(row.ljust(width) for row in straightened)
+
+
 def is_box_drawing_block(code: str) -> bool:
     """Check if a code block contains box-drawing art."""
     lines = code.strip().split("\n")
@@ -361,7 +480,7 @@ def preserves_text(code: str, table_html: str) -> bool:
 
 def ascii_to_html_table(code: str) -> str:
     """Convert an ASCII box-drawing diagram to an HTML table."""
-    lines = code.strip().split("\n")
+    lines = normalise_grid(code).split("\n")
     all_clusters = find_column_clusters(lines)
 
     if len(all_clusters) < 2:
