@@ -478,9 +478,77 @@ def preserves_text(code: str, table_html: str) -> bool:
     return not (text_tokens(code) - text_tokens(plain))
 
 
+# The four corners a box can be drawn with -- single, double, heavy and
+# rounded -- and what its edges may be made of, including the junctions
+# where another wall or rule meets them.
+CORNERS = ("\u250c\u2554\u250f\u256d", "\u2510\u2557\u2513\u256e",
+           "\u2514\u255a\u2517\u2570", "\u2518\u255d\u251b\u256f")
+EDGE_H = set("\u2500\u2501\u2550\u254c\u252c\u2534\u253c\u2566\u2569\u256c")
+EDGE_V = set("\u2502\u2503\u2551\u254e\u251c\u2524\u253c\u2560\u2563\u256c")
+
+
+def extract_rectangles(rows: list[str]) -> list[tuple[int, int, int, int]]:
+    """Find every box whose four edges are unbroken.
+
+    From each top-left corner, run right to a top-right corner and down
+    to a bottom-left one, then check the two closing edges.  Exact rather
+    than statistical, which is why it needs the straightened grid --
+    normalise_grid exists for this.
+    """
+    top_left, top_right, bottom_left, bottom_right = CORNERS
+    width = max((len(row) for row in rows), default=0)
+    rows = [row.ljust(width) for row in rows]
+    boxes = []
+
+    for top, row in enumerate(rows):
+        for left, char in enumerate(row):
+            if char not in top_left:
+                continue
+            right = next((c for c in range(left + 1, width)
+                          if rows[top][c] in top_right
+                          or rows[top][c] not in EDGE_H), None)
+            if right is None or rows[top][right] not in top_right:
+                continue
+            bottom = next((r for r in range(top + 1, len(rows))
+                           if rows[r][left] in bottom_left
+                           or rows[r][left] not in EDGE_V), None)
+            if bottom is None or rows[bottom][left] not in bottom_left:
+                continue
+            if rows[bottom][right] not in bottom_right:
+                continue
+            if any(rows[bottom][c] not in EDGE_H for c in range(left + 1, right)):
+                continue
+            if any(rows[r][right] not in EDGE_V for r in range(top + 1, bottom)):
+                continue
+            boxes.append((top, left, bottom, right))
+    return boxes
+
+
+def is_nested_diagram(rows: list[str]) -> bool:
+    """Check whether the block draws boxes rather than tabulating cells.
+
+    A grid table is one frame subdivided by shared walls: its interior
+    corners are junctions, not corners, so the frame is the only box that
+    closes -- both versions of the workbench spec, and the panel diagram
+    in test-data, extract exactly one.  A diagram draws each box itself,
+    so a second closed box means boxes inside boxes or boxes side by
+    side, and neither is a table.  model-hub's architecture diagram
+    extracts seven.
+
+    A lone box with arrows hanging off it reads as one box here and falls
+    through to the parser, where the cluster gate and the text-loss guard
+    still have the last word.
+    """
+    return len(extract_rectangles(rows)) >= 2
+
+
 def ascii_to_html_table(code: str) -> str:
     """Convert an ASCII box-drawing diagram to an HTML table."""
     lines = normalise_grid(code).split("\n")
+
+    if is_nested_diagram(lines):
+        return None
+
     all_clusters = find_column_clusters(lines)
 
     if len(all_clusters) < 2:
