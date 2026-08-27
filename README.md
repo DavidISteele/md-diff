@@ -175,7 +175,7 @@ git config --global diff.tool md-diff
 The same renderer and the same window, without the diff:
 
 ```
-md-view file.md [--toc] [-o output.html]
+md-view [file.md | -] [--toc] [-o output.html]
 ```
 
 `-o` writes standalone HTML and stops; otherwise the file opens in the GUI
@@ -189,6 +189,28 @@ Pandoc builds the document here rather than a fragment, which is what supplies
 relative images have no base URI to resolve against and must be inlined. Both
 paths share one stylesheet, so a document reads the same viewed as it does
 diffed — ASCII diagrams included.
+
+#### Piping markdown in
+
+Markdown that never was a file can go in on stdin, which puts the window at
+the end of a pipeline:
+
+```
+pandoc -t gfm report.docx | md-view
+git show HEAD:README.md | md-view
+md-view < notes.md
+```
+
+Naming `-` as the file asks for stdin outright; with no argument at all,
+md-view reads stdin when something is piped or redirected into it, and falls
+back to the file chooser otherwise. That distinction is by descriptor, not
+`isatty()` — the [desktop entry](#desktop-entry) launches md-view with no
+argument and no terminal, and stdin there is `/dev/null`, which must still
+open the chooser rather than render an empty document.
+
+A piped document has no file to resolve relative links against, so they get
+the working directory instead, and the header bar reads `stdin` over that
+directory where a file would name itself over its own.
 
 ### Desktop entry
 
