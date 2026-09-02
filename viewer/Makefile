@@ -3,18 +3,21 @@ PKGS = gtk4 webkitgtk-6.0
 CFLAGS ?= -O2 -Wall
 LDLIBS = $(shell pkg-config --libs $(PKGS))
 
-md-diff-view: md-diff-view.c nav_js.h
+# The browser-side scripts stay JavaScript in .js files, and become C string
+# literals here, so the binary carries no runtime dependency on files sitting
+# next to it.
+SCRIPTS = nav_js.h find_js.h
+
+md-diff-view: md-diff-view.c $(SCRIPTS)
 	$(CC) $(CFLAGS) $(shell pkg-config --cflags $(PKGS)) -o $@ $< $(LDLIBS)
 
-# The navigation script stays JavaScript in a .js file, and becomes a C
-# string literal here, so the binary carries no runtime dependency on a
-# file sitting next to it.
-nav_js.h: nav.js
-	{ printf 'static const char NAV_JS[] =\n'; \
+%_js.h: %.js
+	{ printf 'static const char %s_JS[] =\n' \
+	    "$$(printf '%s' '$*' | tr 'a-z-' 'A-Z_')"; \
 	  sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $<; \
 	  printf ';\n'; } > $@
 
 clean:
-	rm -f md-diff-view nav_js.h
+	rm -f md-diff-view $(SCRIPTS)
 
 .PHONY: clean
