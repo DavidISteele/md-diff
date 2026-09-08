@@ -9,12 +9,18 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
-ID=org.user.local.md-diff-view
+# The entry and the window that opens from it are md-view's. The icon is
+# installed under the diff's id as well, so a window git difftool opens is
+# not left with the generic default.
+ID=org.user.local.md-view
+DIFF_ID=org.user.local.md-diff-view
 
 mkdir -p "$DATA/applications" "$DATA/icons/hicolor/scalable/apps"
 
-install -m644 "$REPO/packaging/icons/$ID.svg" \
+install -m644 "$REPO/packaging/icons/$DIFF_ID.svg" \
               "$DATA/icons/hicolor/scalable/apps/$ID.svg"
+install -m644 "$REPO/packaging/icons/$DIFF_ID.svg" \
+              "$DATA/icons/hicolor/scalable/apps/$DIFF_ID.svg"
 
 # Rewrite Exec/TryExec to an absolute path: a desktop session's PATH is not
 # the shell's, and ~/bin is often missing from it.
@@ -34,6 +40,7 @@ command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 --noincremental >/dev/null 
 echo "Installed:"
 echo "  $DATA/applications/$ID.desktop"
 echo "  $DATA/icons/hicolor/scalable/apps/$ID.svg"
+echo "  $DATA/icons/hicolor/scalable/apps/$DIFF_ID.svg"
 echo
 echo "Make it the default for markdown with:"
 echo "  xdg-mime default $ID.desktop text/markdown"

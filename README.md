@@ -196,7 +196,7 @@ git config --global diff.tool md-diff
 The same renderer and the same window, without the diff:
 
 ```
-md-view [file.md | -] [--toc] [-o output.html]
+md-view [file.md | -] [--toc] [--new-window] [-o output.html]
 ```
 
 `-o` writes standalone HTML and stops; otherwise the file opens in the GUI
@@ -204,6 +204,16 @@ window, with `Ctrl+F` / `Ctrl+S`, `Ctrl` `+` / `-` / `0` and `q` / `Esc` /
 `Ctrl+W` as above. There is nothing to step through in a single file, so the
 change stepper is absent — the search box and the overview strip stay, the
 latter as a scrollbar that doesn't fade. `--no-sandbox` applies here too.
+
+Documents being read collect in one place: a second `md-view` joins the one
+already running rather than starting its own, and hands the shell back its
+prompt instead of waiting. The first one still waits, being the process that
+holds the window. `--new-window` opts out for a document you want kept apart.
+
+Diffs never join it. md-diff registers a different GTK application id, so the
+two can't adopt each other's windows — and git difftool depends on that: it
+runs the tool once per file and waits for each to exit, which an invocation
+that attached to a running window would break.
 
 Pandoc builds the document here rather than a fragment, which is what supplies
 `--toc` and the embedded resources: the window loads the HTML as a string, so

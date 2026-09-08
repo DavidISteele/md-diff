@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Markdown Viewer
+GenericName=Rendered Markdown Viewer
+Comment=Render a markdown file and read it in a window
+Exec=md-view %f
+TryExec=md-view
+Icon=org.user.local.md-view
+Terminal=false
+StartupNotify=true
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+Keywords=markdown;md;preview;render;diff;
+# The entry launches md-view, so it carries md-view's application id -- the
+# id the session registers, and the icon name the window asks for. The diff
+# keeps its own id and never appears in a menu, being run by git.
+#
+# WM_CLASS on X11 comes from the binary name, which both modes share, so it
+# stays md-diff-view. It is what lets the shell pair the window with this
+# entry rather than showing it as an unnamed application.
+StartupWMClass=md-diff-view

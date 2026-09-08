@@ -59,6 +59,10 @@ static const char SANDBOX_HELP[] =
 "empty cell -- and this tool exists to render markdown out of branches\n"
 "other people wrote.\n";
 
+/* One document in one window.  Heap-allocated and owned by the window,
+   because in session mode a single process serves many invocations and each
+   arrives with its own document and its own captions -- the options below
+   describe whichever invocation is being parsed, not the window on screen. */
 typedef struct {
     GtkWidget *counter;      /* NULL when the stepper is off */
     GtkWidget *search_bar;
@@ -66,6 +70,9 @@ typedef struct {
     GtkWidget *search_counter;
     WebKitWebView *webview;
     GString *document;
+    char *title;
+    char *heading;
+    char *subheading;
     gboolean navigation;
     gboolean loaded;         /* first load done: later navigation is denied */
 } Viewer;
@@ -76,6 +83,7 @@ static char *opt_subheading = NULL;
 static gboolean opt_no_navigation = FALSE;
 static gboolean opt_no_sandbox = FALSE;
 static gboolean opt_check_sandbox = FALSE;
+static char *opt_session = NULL;
 static char **opt_files = NULL;
 
 /* The text options are G_OPTION_ARG_FILENAME, which GLib hands back as the
@@ -97,6 +105,14 @@ static const GOptionEntry OPTIONS[] = {
       "Run WebKit without its content sandbox", NULL },
     { "check-sandbox", 0, 0, G_OPTION_ARG_NONE, &opt_check_sandbox,
       "Report whether the sandbox can start here, and exit", NULL },
+    /* Absent, this is one process showing one document, which is what git
+       difftool needs: it runs the tool once per file and waits for each to
+       exit.  Given, the invocation instead joins -- or becomes -- the single
+       instance with this id, and md-view accumulates documents in one place.
+       The id is what keeps the two apart: md-diff and md-view register
+       different names, so neither can ever adopt the other's windows. */
+    { "session", 0, 0, G_OPTION_ARG_FILENAME, &opt_session,
+      "Join or become the single instance with this application id", "ID" },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_files,
       NULL, "[FILE]" },
     { NULL, 0, 0, 0, NULL, NULL, NULL }
@@ -130,6 +146,47 @@ static GString *read_document(const char *path, GError **error)
 
     GString *buffer = g_string_new_len(contents, length);
     g_free(contents);
+    return buffer;
+}
+
+/* A session invocation's document arrives down the invoking process's own
+   stdin: GApplication passes the file descriptor to the primary instance, so
+   an embedded-image document costs nothing to hand over and never touches
+   the filesystem or the bus. */
+static GString *read_remote_document(GApplicationCommandLine *cmdline,
+                                     const char *path, GError **error)
+{
+    if (path != NULL && !g_str_equal(path, "-")) {
+        /* Relative to the directory the invoking process was in, which is
+           not the primary instance's. */
+        char *full = g_path_is_absolute(path)
+            ? g_strdup(path)
+            : g_build_filename(g_application_command_line_get_cwd(cmdline),
+                               path, NULL);
+        GString *document = read_document(full, error);
+        g_free(full);
+        return document;
+    }
+
+    GInputStream *stream = g_application_command_line_get_stdin(cmdline);
+    if (stream == NULL) {
+        g_set_error(error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                    "no document: nothing on stdin");
+        return NULL;
+    }
+
+    GString *buffer = g_string_new(NULL);
+    char chunk[8192];
+    gssize count;
+    while ((count = g_input_stream_read(stream, chunk, sizeof chunk,
+                                        NULL, error)) > 0)
+        g_string_append_len(buffer, chunk, count);
+    g_object_unref(stream);
+
+    if (count < 0) {
+        g_string_free(buffer, TRUE);
+        return NULL;
+    }
     return buffer;
 }
 
@@ -576,26 +633,53 @@ static void add_search_bar(GtkWidget *content, Viewer *viewer)
     gtk_box_append(GTK_BOX(content), bar);
 }
 
-static void on_activate(GtkApplication *app, gpointer data)
+/* Takes the document; copies the captions, which belong to whichever
+   invocation is being parsed and are reset before the next one. */
+static Viewer *viewer_new(GString *document)
 {
-    Viewer *viewer = data;
-    const char *title = opt_title != NULL ? opt_title : "md-diff";
+    Viewer *viewer = g_new0(Viewer, 1);
+    viewer->document = document;
+    viewer->title = g_strdup(opt_title != NULL ? opt_title : "md-diff");
+    viewer->heading = g_strdup(opt_heading != NULL ? opt_heading
+                                                  : viewer->title);
+    viewer->subheading = g_strdup(opt_subheading);
+    viewer->navigation = !opt_no_navigation;
+    return viewer;
+}
 
+static void viewer_free(Viewer *viewer)
+{
+    g_string_free(viewer->document, TRUE);
+    g_free(viewer->title);
+    g_free(viewer->heading);
+    g_free(viewer->subheading);
+    g_free(viewer);
+}
+
+static void open_window(GtkApplication *app, Viewer *viewer)
+{
     /* X11 draws the titlebar and taskbar icon from the _NET_WM_ICON pixmaps
        on the window, and GTK4 only attaches them when the icon is named --
        the application id alone leaves the window with the generic default.
        The name resolves through the icon theme to the SVG that
-       packaging/install-desktop.sh installs. */
-    gtk_window_set_default_icon_name(APP_ID);
+       packaging/install-desktop.sh installs.  It follows the id in use, so a
+       session names its own icon rather than borrowing the diff's. */
+    gtk_window_set_default_icon_name(
+        g_application_get_application_id(G_APPLICATION(app)));
 
     GtkWidget *window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(window), title);
+    gtk_window_set_title(GTK_WINDOW(window), viewer->title);
     gtk_window_set_default_size(GTK_WINDOW(window), 1100, 850);
+
+    /* The window owns the document from here on: in session mode the
+       invocation that supplied it is long gone. */
+    g_signal_connect_swapped(window, "destroy", G_CALLBACK(viewer_free),
+                             viewer);
 
     GtkWidget *header = gtk_header_bar_new();
     gtk_header_bar_set_title_widget(
         GTK_HEADER_BAR(header),
-        build_title(opt_heading != NULL ? opt_heading : title, opt_subheading));
+        build_title(viewer->heading, viewer->subheading));
     if (viewer->navigation)
         add_stepper(header, viewer);
     gtk_window_set_titlebar(GTK_WINDOW(window), header);
@@ -623,6 +707,64 @@ static void on_activate(GtkApplication *app, gpointer data)
     gtk_widget_add_controller(window, keys);
 
     gtk_window_present(GTK_WINDOW(window));
+}
+
+/* One process, one document: the document was read before the application
+   started, because there is only ever this one. */
+static void on_activate(GtkApplication *app, gpointer data)
+{
+    open_window(app, data);
+}
+
+/* Discard the previous invocation's captions.  The option variables are
+   parse targets, and in session mode they are parsed once per invocation --
+   what a window keeps is the copy viewer_new takes. */
+static void reset_options(void)
+{
+    g_clear_pointer(&opt_title, g_free);
+    g_clear_pointer(&opt_heading, g_free);
+    g_clear_pointer(&opt_subheading, g_free);
+    g_clear_pointer(&opt_files, g_strfreev);
+    opt_no_navigation = FALSE;
+}
+
+/* A session invocation, local or remote: parse its arguments, take its
+   document, give it a window.  Returning ends the invoking process, which is
+   why md-view hands back the shell prompt instead of waiting -- except for
+   the invocation that became the primary instance, which stays for as long
+   as it has a window to show. */
+static int on_command_line(GApplication *app, GApplicationCommandLine *cmdline,
+                           gpointer data)
+{
+    GError *error = NULL;
+    char **arguments = g_application_command_line_get_arguments(cmdline, NULL);
+    GOptionContext *context = g_option_context_new(NULL);
+
+    (void) data;
+    reset_options();
+    g_option_context_add_main_entries(context, OPTIONS, NULL);
+    if (!g_option_context_parse_strv(context, &arguments, &error)) {
+        g_application_command_line_printerr(cmdline, "md-diff-view: %s\n",
+                                            error->message);
+        g_clear_error(&error);
+        g_option_context_free(context);
+        g_strfreev(arguments);
+        return 2;
+    }
+    g_option_context_free(context);
+    g_strfreev(arguments);
+
+    GString *document = read_remote_document(
+        cmdline, opt_files != NULL ? opt_files[0] : NULL, &error);
+    if (document == NULL) {
+        g_application_command_line_printerr(cmdline, "md-diff-view: %s\n",
+                                            error->message);
+        g_clear_error(&error);
+        return 1;
+    }
+
+    open_window(GTK_APPLICATION(app), viewer_new(document));
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -662,11 +804,27 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    Viewer viewer = { NULL, NULL, NULL, NULL, NULL, NULL,
-                      !opt_no_navigation, FALSE };
-    viewer.document = read_document(opt_files != NULL ? opt_files[0] : NULL,
-                                    &error);
-    if (viewer.document == NULL) {
+    if (opt_session != NULL) {
+        /* Nothing is read here.  The document travels as a file descriptor
+           to whichever instance shows it, and that may be a process which
+           started long before this one -- so the reading belongs there, in
+           on_command_line, not in the invocation that happens to be typing.
+
+           --no-sandbox is likewise the primary's decision: it is acted on
+           before WebKit starts, and by the time a later invocation arrives
+           the renderer it would have configured is already running. */
+        GtkApplication *app = gtk_application_new(
+            opt_session, G_APPLICATION_HANDLES_COMMAND_LINE);
+        g_signal_connect(app, "command-line", G_CALLBACK(on_command_line),
+                         NULL);
+        int status = g_application_run(G_APPLICATION(app), argc, argv);
+        g_object_unref(app);
+        return status;
+    }
+
+    GString *document = read_document(opt_files != NULL ? opt_files[0] : NULL,
+                                      &error);
+    if (document == NULL) {
         g_printerr("md-diff-view: %s\n", error->message);
         g_clear_error(&error);
         return 1;
@@ -674,13 +832,14 @@ int main(int argc, char **argv)
 
     /* NON_UNIQUE: git difftool invokes us once per file and waits for each to
        exit.  Sharing one instance would let later invocations return
-       immediately and break that sequencing. */
+       immediately and break that sequencing -- which is exactly what
+       --session asks for, and exactly why the diff never passes it. */
     GtkApplication *app = gtk_application_new(APP_ID,
                                               G_APPLICATION_NON_UNIQUE);
-    g_signal_connect(app, "activate", G_CALLBACK(on_activate), &viewer);
+    g_signal_connect(app, "activate", G_CALLBACK(on_activate),
+                     viewer_new(document));
     int status = g_application_run(G_APPLICATION(app), 0, NULL);
 
     g_object_unref(app);
-    g_string_free(viewer.document, TRUE);
     return status;
 }

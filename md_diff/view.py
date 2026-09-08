@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Render a single markdown file and open it in the md-diff window.
 
-Usage: md-view [file.md | -] [--toc] [-o output.html]
+Usage: md-view [file.md | -] [--toc] [--new-window] [-o output.html]
 
 Markdown can also arrive on stdin -- `pandoc -t gfm x.docx | md-view` --
 either by naming `-` or just by piping, since a file argument is what the
 desktop launcher lacks and stdin is what it has nothing on.
+
+Documents collect in one md-view: an invocation joins the instance already
+running and returns, rather than opening a window of its own and waiting.
+The diff never does -- see gui.VIEW_APP_ID for why the two stay apart.
 
 The same renderer and the same window as the diff, minus the diff: a
 document reads the same viewed as it does in `md-diff-gui`.  Pandoc builds
@@ -24,7 +28,7 @@ import tempfile
 from pathlib import Path
 
 from md_diff.ascii_table import convert_ascii_tables
-from md_diff.gui import NAV_CSS, show_document
+from md_diff.gui import NAV_CSS, VIEW_APP_ID, show_document
 from md_diff.rich_diff import CSS
 
 # Rules that only apply to a document pandoc built from its own template.
@@ -179,6 +183,9 @@ def main():
                         help="Write the HTML to a file instead of opening it")
     parser.add_argument("--toc", action="store_true",
                         help="Include a table of contents")
+    parser.add_argument("--new-window", action="store_true",
+                        help="Open a window of its own instead of joining "
+                             "the md-view already running")
     parser.add_argument("--no-sandbox", action="store_true",
                         help="Run WebKit without its content sandbox, for "
                              "systems that block unprivileged user namespaces")
@@ -226,8 +233,10 @@ def main():
 
     document = render_source(markdown, title, where, toc=args.toc,
                              extra_css=NAV_CSS)
+    # Documents being read accumulate in one md-view; diffs never do.
     return show_document(document, title, title, str(where),
-                         navigation=False, no_sandbox=args.no_sandbox)
+                         navigation=False, no_sandbox=args.no_sandbox,
+                         session=None if args.new_window else VIEW_APP_ID)
 
 
 if __name__ == "__main__":

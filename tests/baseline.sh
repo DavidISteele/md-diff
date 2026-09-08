@@ -135,6 +135,12 @@ awk '/^START/ { if (open) exit 1; open = 1 }
      END      { exit 0 }' "$STUB_LOG"
 check "difftool invocations do not overlap (git's wait is honoured)" $?
 
+# md-diff must never join a session.  Sharing an instance would let an
+# invocation return before its window closed, breaking git's wait -- and
+# would put a diff in the window documents are being read in.
+grep -q -- '--session' "$STUB_LOG"
+[[ $? -ne 0 ]]; check "difftool never asks to join a session" $?
+
 # The document is a whole standalone page, built before the viewer starts:
 # nothing reads the temp checkouts afterwards.
 grep -q '<!DOCTYPE html>' "$STUB_DIR/doc.0"; check "viewer receives a standalone document on stdin" $?
@@ -169,6 +175,13 @@ status=$?
 check "md-view opens a file" $status
 grep -q 'START' "$STUB_LOG"; check "md-view reaches the viewer" $?
 grep -q -- '--no-navigation' "$STUB_LOG"; check "md-view suppresses the change stepper" $?
+grep -q -- '--session org.user.local.md-view' "$STUB_LOG"
+check "md-view joins its own session" $?
+
+reset_log
+python3 -m md_diff.view "$REPO_DIR/doc.md" --new-window >/dev/null 2>&1
+grep -q -- '--session' "$STUB_LOG"
+[[ $? -ne 0 ]]; check "md-view --new-window opts out of the session" $?
 
 # --output is a pure renderer.  It must never reach the viewer -- and once
 # md-view attaches to a running window, must never attach either.
@@ -225,6 +238,85 @@ else
     done
     check "md-diff returns once the window closes" $exited
     wait "$wrapper" 2>/dev/null
+fi
+
+# --- 5. sessions, end to end -------------------------------------------------
+
+echo
+echo "md-view session"
+
+viewers() { pgrep -xc md-diff-view 2>/dev/null || true; }
+
+if [[ $RUN_GUI -eq 0 ]]; then
+    note "session tests (--no-gui)"
+elif [[ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    note "session tests (no display)"
+elif [[ ! -x "$REPO/viewer/md-diff-view" ]]; then
+    note "session tests (viewer not built)"
+elif [[ $(viewers) -ne 0 ]]; then
+    note "session tests (a viewer is already running)"
+else
+    # The first invocation becomes the primary instance and holds the
+    # window, so it waits -- as md-view has always done.
+    python3 -m md_diff.view "$REPO_DIR/doc.md" >/dev/null 2>&1 &
+    first=$!
+    for _ in $(seq 40); do
+        [[ $(viewers) -gt 0 ]] && break
+        sleep 0.25
+    done
+    sleep 1
+    [[ $(viewers) -eq 1 ]]; check "md-view starts one viewer process" $?
+
+    # The second joins it: it must come back rather than wait, and must not
+    # have started a process of its own.
+    printf '# Second\n\nAnother document.\n' > "$WORK/second.md"
+    start=$(date +%s%N)
+    timeout 20 python3 -m md_diff.view "$WORK/second.md" >/dev/null 2>&1
+    second_status=$?
+    elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
+
+    check "second md-view exits 0" $second_status
+    [[ $elapsed -lt 5000 ]]
+    check "second md-view returns instead of waiting (${elapsed}ms)" $?
+    kill -0 "$first" 2>/dev/null
+    check "the first md-view is still holding its window" $?
+    sleep 0.5
+    [[ $(viewers) -eq 1 ]]
+    check "the second document joined the running process" $?
+
+    # One process is only half of it: the document has to be on screen.
+    # Windows are titled by document, so X can be asked directly.
+    if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        for _ in $(seq 20); do
+            xwininfo -root -tree 2>/dev/null | grep -q '"second.md"' && break
+            sleep 0.25
+        done
+        tree=$(xwininfo -root -tree 2>/dev/null)
+        grep -q '"second.md"' <<<"$tree"
+        check "the joined document has a window" $?
+        grep -q '"doc.md"' <<<"$tree"
+        check "the first document still has its own window" $?
+    else
+        note "window checks (no xwininfo)"
+    fi
+
+    # The separation that matters: a diff opened while md-view is up gets
+    # its own process, and waits.
+    python3 -m md_diff.gui "$REPO_DIR/doc.md" "$REPO_DIR/doc.md" \
+        --label-old old --label-new new >/dev/null 2>&1 &
+    diff_pid=$!
+    for _ in $(seq 40); do
+        [[ $(viewers) -gt 1 ]] && break
+        sleep 0.25
+    done
+    sleep 0.5
+    [[ $(viewers) -eq 2 ]]
+    check "md-diff opens a process of its own beside md-view" $?
+    kill -0 "$diff_pid" 2>/dev/null
+    check "md-diff still blocks while md-view is running" $?
+
+    pkill -x md-diff-view
+    wait "$first" "$diff_pid" 2>/dev/null
 fi
 
 # --- Summary -----------------------------------------------------------------

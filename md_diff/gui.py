@@ -86,6 +86,12 @@ body { padding-right: 22px; }
 
 VIEWER = "md-diff-view"
 
+# md-view's own GTK application id, distinct from the viewer's APP_ID, which
+# is the diff's.  Two ids are two names on the session bus, so a document
+# being read can never land in a window git difftool is driving, and vice
+# versa -- the separation is enforced rather than merely intended.
+VIEW_APP_ID = "org.user.local.md-view"
+
 VIEWER_MISSING = """\
 Error: {viewer} not found.
 
@@ -110,7 +116,8 @@ def find_viewer() -> str | None:
 
 
 def show_document(document: str, title: str, heading: str, subheading: str = "",
-                  navigation: bool = True, no_sandbox: bool = False) -> int:
+                  navigation: bool = True, no_sandbox: bool = False,
+                  session: str | None = None) -> int:
     """Show an HTML document in the viewer. Returns a process exit code.
 
     The document goes over stdin rather than a temporary file: it is the
@@ -120,6 +127,12 @@ def show_document(document: str, title: str, heading: str, subheading: str = "",
     `navigation` shows the change stepper -- the header buttons, the counter
     and the n/p keys.  A single rendered file has nothing to step through, so
     md-view turns it off.
+
+    `session` names a GTK application id to join, so a second document opens
+    beside the first instead of in a window of its own.  The diff never
+    passes one: git difftool runs the tool once per file and waits for each
+    to exit, and an invocation that joined a running window would return
+    straight away.
     """
     viewer = find_viewer()
     if viewer is None:
@@ -135,6 +148,8 @@ def show_document(document: str, title: str, heading: str, subheading: str = "",
         command.append("--no-navigation")
     if no_sandbox:
         command.append("--no-sandbox")
+    if session:
+        command += ["--session", session]
 
     return subprocess.run(command, input=document, text=True).returncode
 
