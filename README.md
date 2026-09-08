@@ -72,6 +72,7 @@ attach to — see [WebKit sandbox](#webkit-sandbox). `md-diff-gui` finds it in
 | --- | --- |
 | `n` / `Tab` / `Alt+Down` | Next change |
 | `p` / `Shift+Tab` / `Alt+Up` | Previous change |
+| `Ctrl+F`, `Ctrl+S` | Find |
 | `Ctrl` `+` / `-` / `0` | Zoom in / out / reset |
 | `q`, `Esc`, `Ctrl+W` | Close |
 
@@ -84,6 +85,24 @@ table row — placed where that change falls in the file, with the change you
 jumped to ringed in blue. The scrollbar thumb is drawn on top of it and stays
 visible rather than fading out; click or drag the strip to scroll.
 
+#### Find
+
+`Ctrl+F` or `Ctrl+S` drops a search box out from under the title bar. Typing
+in it highlights every occurrence of the string in the document — the search
+is case-insensitive — and counts them beside the box (`3 / 17`). `Down` and
+`Up`, `Return` and `Shift+Return`, or the two arrow buttons step through the
+matches, wrapping at the ends; the one you are on is picked out from the rest
+and scrolled to. `Esc` puts the box away and drops the highlighting with it —
+a second `Esc` closes the window as usual.
+
+While the box has the keyboard the document's own single-key bindings stand
+down, so `n`, `p` and `q` are letters to type rather than commands.
+
+A match is found only where it lies inside one run of text: a phrase spanning
+an inline change in a diff — `the word`, where `word` is an insertion — is
+not matched, because finding it would mean rewriting the markup the diff
+exists to show.
+
 #### Untrusted documents
 
 This tool renders markdown out of git branches, so a document it is pointed
@@ -93,8 +112,10 @@ markdown file straight through, which means a document can arrive carrying
 
 - **Page script does not run.** `enable-javascript-markup` is off, which
   kills `<script>` and inline handlers while leaving the host's own
-  `evaluate_javascript` working — that is what drives the change stepper and
-  the overview map, so the feature survives the mitigation.
+  `evaluate_javascript` working — that is what drives the change stepper, the
+  search and the overview map, so the features survive the mitigation. A
+  query typed into the search box reaches that script as a quoted string
+  literal, never as code.
 - **The renderer has no network.** It runs in an ephemeral session with the
   proxy pointed at a dead address. Rendering a local file needs no network,
   and a document that asks for one is either tracking who opened it or
@@ -179,10 +200,10 @@ md-view [file.md | -] [--toc] [-o output.html]
 ```
 
 `-o` writes standalone HTML and stops; otherwise the file opens in the GUI
-window, with `Ctrl` `+` / `-` / `0` and `q` / `Esc` / `Ctrl+W` as above. There
-is nothing to step through in a single file, so the change stepper is absent —
-the overview strip stays, as a scrollbar that doesn't fade. `--no-sandbox`
-applies here too.
+window, with `Ctrl+F` / `Ctrl+S`, `Ctrl` `+` / `-` / `0` and `q` / `Esc` /
+`Ctrl+W` as above. There is nothing to step through in a single file, so the
+change stepper is absent — the search box and the overview strip stay, the
+latter as a scrollbar that doesn't fade. `--no-sandbox` applies here too.
 
 Pandoc builds the document here rather than a fragment, which is what supplies
 `--toc` and the embedded resources: the window loads the HTML as a string, so
