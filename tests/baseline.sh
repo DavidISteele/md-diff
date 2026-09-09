@@ -347,6 +347,13 @@ else
         [[ $(viewers) -eq 1 ]]
         check "undocking starts no second process" $?
 
+        # The window a document left re-captions itself once the notebook
+        # has settled, which is deliberately not immediate.
+        for _ in $(seq 20); do
+            window_named doc.md && break
+            sleep 0.25
+        done
+        echo "    [debug] $(xwininfo -root -tree 2>/dev/null | grep '("md-diff-view" "md-diff-view")' | grep -v '1x1' | sed 's/.*"\(.*\)": (.*/\1/' | tr '\n' '|')"
         window_named second.md && window_named doc.md
         check "both documents are now on screen at once" $?
     else

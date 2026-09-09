@@ -346,6 +346,52 @@ Handles complex box-drawing diagrams including:
 - Multi-line cells merged into logical rows
 - Sections with varying column counts (colspan)
 
+## Known issues
+
+### Dragging a tab out corrupts the tab strip (GTK 4.8)
+
+Dragging a tab out of an md-view window to make a new window leaves the tab
+strip misdrawn for the rest of that window's life. The tab you switch to is
+not repainted, its neighbour loses an edge, and dropping a tab into its own
+content area can crash the window. It takes four or more open documents to
+show up reliably, and once triggered it is repeatable until the window is
+closed.
+
+This is a GTK bug, not an md-view one. `tests/notebook-repro.c` is a stock
+`GtkNotebook` with plain labels, detachable tabs and the smallest possible
+`create-window` handler -- no WebKit, nothing from this project -- and it
+corrupts its own strip the same way:
+
+```
+cc -O2 -Wall $(pkg-config --cflags gtk4) -o /tmp/notebook-repro \
+   tests/notebook-repro.c $(pkg-config --libs gtk4)
+/tmp/notebook-repro          # drag a tab out, then switch tabs
+```
+
+Debian 12 pins GTK to 4.8.3 (September 2022), which is where the GTK4
+notebook's drag-and-drop was newest and least settled; the WebKit beside it
+is three years younger. Nothing in this window can fix it from above -- the
+attempts are recorded in the git history, and none of them held.
+
+The gesture is kept because it works when it works, and because everything
+it does is also on the keyboard: `Ctrl+Shift+D` undocks a document without
+any dragging, and has never misbehaved. Re-test after a GTK upgrade with the
+reproducer above; if the strip survives, the workarounds below can go with
+the bug.
+
+What is here on account of it:
+
+- `refresh_window` in `viewer/md-diff-view.c` defers hiding the tab strip and
+  closing an emptied window until after the drag has finished. This one is a
+  genuine fix -- doing that work inside `page-added` and `page-removed` pulls
+  widgets out from under a drag GTK has not finished with, and made the
+  corruption much worse.
+- `MD_DIFF_DEBUG_TABS=1` prints the state of every tab label -- size,
+  visibility, mapping -- on each switch and after each move. It is what
+  established that the labels are correctly sized, visible and mapped while
+  drawing blank, which is what ruled out every explanation except GTK's own
+  rendering.
+
 ## Dependencies
 
 - Python 3.10+

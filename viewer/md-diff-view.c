@@ -90,6 +90,7 @@ struct Window {
     GtkWidget *search_entry;
     GtkWidget *search_counter;
     GtkWidget *tabs_button;  /* NULL outside a session */
+    guint refresh;           /* pending idle: see schedule_refresh */
     gboolean closing;        /* window teardown, not a tab being closed */
 };
 
@@ -635,6 +636,41 @@ static Viewer *current_viewer(Window *win)
                                                index));
 }
 
+/* Report what the tab strip actually looks like, for a fault that only
+   appears on a desktop this cannot be reproduced on.  Set MD_DIFF_DEBUG_TABS
+   to switch it on; it says nothing otherwise.
+
+   A label that is 0 wide is a layout failure -- the strip has not been
+   re-allocated.  One that is not visible or not mapped is a visibility
+   failure.  The two want opposite fixes, and the symptom looks the same. */
+static void debug_tabs(Window *win, const char *when)
+{
+    GtkNotebook *notebook = GTK_NOTEBOOK(win->notebook);
+    int count;
+
+    if (g_getenv("MD_DIFF_DEBUG_TABS") == NULL)
+        return;
+
+    count = gtk_notebook_get_n_pages(notebook);
+    g_printerr("[tabs] %s: pages=%d show_tabs=%d current=%d\n", when, count,
+               gtk_notebook_get_show_tabs(notebook),
+               gtk_notebook_get_current_page(notebook));
+    for (int i = 0; i < count; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(notebook, i);
+        GtkWidget *label = gtk_notebook_get_tab_label(notebook, page);
+
+        if (label == NULL) {
+            g_printerr("  [%d] no label widget\n", i);
+            continue;
+        }
+        g_printerr("  [%d] label %dx%d visible=%d child_visible=%d mapped=%d\n",
+                   i, gtk_widget_get_width(label), gtk_widget_get_height(label),
+                   gtk_widget_get_visible(label),
+                   gtk_widget_get_child_visible(label),
+                   gtk_widget_get_mapped(label));
+    }
+}
+
 /* Point the window's chrome at one document.  Everything here is per-tab
    but drawn once, so switching tabs means re-pointing rather than swapping
    widgets in and out. */
@@ -642,6 +678,8 @@ static void sync_chrome(Window *win, Viewer *viewer)
 {
     if (viewer == NULL)
         return;
+
+    debug_tabs(win, "switch");
 
     gtk_window_set_title(GTK_WINDOW(win->window), viewer->title);
     gtk_header_bar_set_title_widget(
@@ -662,6 +700,7 @@ static void sync_chrome(Window *win, Viewer *viewer)
     if (gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(win->search_bar)))
         find_text(viewer,
                   gtk_editable_get_text(GTK_EDITABLE(win->search_entry)));
+
 }
 
 /* One document -- every diff, and md-view until a second arrives -- looks
@@ -713,14 +752,71 @@ static void toggle_tabs(Window *win)
         !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(win->tabs_button)));
 }
 
+/* Put the window back in order once the notebook has finished with it.
+ *
+ * page-added and page-removed are emitted in the middle of a tab drag, while
+ * GtkNotebook is still moving the page between strips.  Doing anything
+ * structural from there -- hiding the tab area because a window is down to
+ * one document, or closing a window whose last tab has just left -- pulls
+ * widgets out from under a drag that has not finished, and the strip is left
+ * misdrawn for the rest of the session: tabs vanish as you switch, and a
+ * dragged tab stays where it was dropped instead of the strip re-flowing.
+ *
+ * An idle runs after the drag completes, when the notebook is settled and
+ * these are ordinary operations again.
+ */
+static gboolean refresh_window(gpointer data)
+{
+    Window *win = data;
+
+    win->refresh = 0;
+    if (win->closing)
+        return G_SOURCE_REMOVE;
+
+    /* The last document left for another window. */
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) == 0) {
+        gtk_window_destroy(GTK_WINDOW(win->window));
+        return G_SOURCE_REMOVE;
+    }
+    update_tabs(win);
+    /* The strip keeps the shape it had mid-drag unless it is asked to lay
+       itself out again: tabs stay where they were dropped rather than
+       closing up, and a label can be left with no width at all. */
+    gtk_widget_queue_resize(win->notebook);
+    sync_chrome(win, current_viewer(win));
+    debug_tabs(win, "after drag");
+    return G_SOURCE_REMOVE;
+}
+
+/* A timeout rather than an idle.  An idle runs as soon as the loop has
+   nothing else to do, which can be the same iteration the drag is still in
+   -- before GtkNotebook has finished its own drag-end bookkeeping and before
+   the strip has animated the remaining tabs closed.  Long enough to be
+   after all of that; short enough not to be seen. */
+#define SETTLE_MS 250
+
+static void schedule_refresh(Window *win)
+{
+    if (win->refresh == 0)
+        win->refresh = g_timeout_add(SETTLE_MS, refresh_window, win);
+}
+
 static void on_switch_page(GtkNotebook *notebook, GtkWidget *page,
                            guint index, gpointer data)
 {
+    Window *win = data;
+
     (void) notebook;
     (void) index;
+    /* A pending refresh means a page has just been added or removed, which
+       during a drag is the notebook picking a new current page while the
+       drag is still running.  Touching the window now is what leaves the
+       strip misdrawn; the refresh will do it once everything has settled. */
+    if (win->refresh != 0)
+        return;
     /* The page argument, not get_current_page(): the notebook has not
        finished switching while this runs. */
-    sync_chrome(data, viewer_of(page));
+    sync_chrome(win, viewer_of(page));
 }
 
 /* A page can arrive by being dragged out of another window, in which case
@@ -734,10 +830,11 @@ static void on_page_added(GtkNotebook *notebook, GtkWidget *child,
 
     (void) notebook;
     (void) index;
+    /* Re-pointing the document is safe here and has to happen now; the
+       window's own chrome waits until the drag is over. */
     if (viewer != NULL)
         viewer->win = win;
-    update_tabs(win);
-    sync_chrome(win, current_viewer(win));
+    schedule_refresh(win);
 }
 
 static void on_page_removed(GtkNotebook *notebook, GtkWidget *child,
@@ -752,12 +849,7 @@ static void on_page_removed(GtkNotebook *notebook, GtkWidget *child,
        not the last tab being closed. */
     if (win->closing)
         return;
-    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) == 0) {
-        gtk_window_destroy(GTK_WINDOW(win->window));
-        return;
-    }
-    update_tabs(win);
-    sync_chrome(win, current_viewer(win));
+    schedule_refresh(win);
 }
 
 static void remove_tab(Window *win, GtkWidget *page)
@@ -808,6 +900,9 @@ static GtkNotebook *on_create_window(GtkNotebook *notebook, GtkWidget *page,
     (void) notebook;
     (void) page;
     fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
+    /* Presented here, before the notebook is handed back: GTK is going to
+       put a page into it straight away, and a window that has never been
+       realised is not somewhere to put one. */
     gtk_window_present(GTK_WINDOW(fresh->window));
     return GTK_NOTEBOOK(fresh->notebook);
 }
@@ -835,13 +930,22 @@ static void detach_tab(Window *win)
     fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
     g_object_ref(page);
     gtk_notebook_detach_tab(notebook, page);
-    gtk_notebook_append_page(GTK_NOTEBOOK(fresh->notebook), page,
-                             build_tab_label(page, viewer));
+    int moved = gtk_notebook_append_page(GTK_NOTEBOOK(fresh->notebook), page,
+                                         build_tab_label(page, viewer));
+    /* Named explicitly rather than left to the notebook: without a current
+       page there is no current document, and the window keeps the default
+       caption instead of the document's. */
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(fresh->notebook), moved);
     gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
     gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
     g_object_unref(page);
 
+    /* Not a drag, so nothing to wait for: the new window can be captioned
+       now.  Leaving it to the refresh would show the default title until
+       that fires, and a switch-page raised by the move is ignored while a
+       refresh is pending. */
     gtk_window_present(GTK_WINDOW(fresh->window));
+    sync_chrome(fresh, viewer);
 }
 
 static void on_tab_close_clicked(GtkButton *button, gpointer data)
@@ -1045,6 +1149,11 @@ static void on_window_destroy(GtkWidget *widget, gpointer data)
 
     (void) widget;
     win->closing = TRUE;
+    /* The idle holds a pointer to this window, which is about to go. */
+    if (win->refresh != 0) {
+        g_source_remove(win->refresh);
+        win->refresh = 0;
+    }
 }
 
 static Window *window_new(GtkApplication *app)
