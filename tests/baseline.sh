@@ -284,8 +284,16 @@ else
     [[ $(viewers) -eq 1 ]]
     check "the second document joined the running process" $?
 
-    # One process is only half of it: the document has to be on screen.
-    # Windows are titled by document, so X can be asked directly.
+    # One process is only half of it: the document has to be on screen, and
+    # in the window that was already open rather than one of its own.
+    # Windows are titled by the tab in front, so X can be asked directly.
+    # GTK keeps a 1x1 helper window off-screen that is not one of ours.
+    app_windows() {
+        xwininfo -root -tree 2>/dev/null |
+            grep '("md-diff-view" "md-diff-view")' |
+            grep -vc '1x1+-100+-100'
+    }
+
     if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
         for _ in $(seq 20); do
             xwininfo -root -tree 2>/dev/null | grep -q '"second.md"' && break
@@ -293,9 +301,12 @@ else
         done
         tree=$(xwininfo -root -tree 2>/dev/null)
         grep -q '"second.md"' <<<"$tree"
-        check "the joined document has a window" $?
+        check "the joined document is the tab in front" $?
+        [[ $(app_windows) -eq 1 ]]
+        check "both documents share one window" $?
         grep -q '"doc.md"' <<<"$tree"
-        check "the first document still has its own window" $?
+        [[ $? -ne 0 ]]
+        check "the first document did not keep a window of its own" $?
     else
         note "window checks (no xwininfo)"
     fi
@@ -314,6 +325,17 @@ else
     check "md-diff opens a process of its own beside md-view" $?
     kill -0 "$diff_pid" 2>/dev/null
     check "md-diff still blocks while md-view is running" $?
+
+    # And a window of its own: a diff must never arrive as a tab among the
+    # documents being read.
+    if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        for _ in $(seq 20); do
+            xwininfo -root -tree 2>/dev/null | grep -q 'old . new' && break
+            sleep 0.25
+        done
+        [[ $(app_windows) -eq 2 ]]
+        check "the diff opened a second window rather than a tab" $?
+    fi
 
     pkill -x md-diff-view
     wait "$first" "$diff_pid" 2>/dev/null

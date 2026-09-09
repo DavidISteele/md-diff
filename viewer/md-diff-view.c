@@ -59,23 +59,42 @@ static const char SANDBOX_HELP[] =
 "empty cell -- and this tool exists to render markdown out of branches\n"
 "other people wrote.\n";
 
-/* One document in one window.  Heap-allocated and owned by the window,
+typedef struct Window Window;
+
+/* One document, in one tab.  Heap-allocated and owned by its notebook page,
    because in session mode a single process serves many invocations and each
-   arrives with its own document and its own captions -- the options below
-   describe whichever invocation is being parsed, not the window on screen. */
+   arrives with its own document and its own captions -- the option globals
+   describe whichever invocation is being parsed, never what is on screen. */
 typedef struct {
-    GtkWidget *counter;      /* NULL when the stepper is off */
-    GtkWidget *search_bar;
-    GtkWidget *search_entry;
-    GtkWidget *search_counter;
+    Window *win;             /* the window this document is showing in */
     WebKitWebView *webview;
     GString *document;
     char *title;
     char *heading;
     char *subheading;
-    gboolean navigation;
+    gboolean navigation;     /* the stepper suits a diff, not a single file */
     gboolean loaded;         /* first load done: later navigation is denied */
 } Viewer;
+
+/* The chrome, which belongs to the window rather than to any one document:
+   the header caption, the stepper and the search bar all retarget to
+   whichever tab is in front.  Keeping one of each -- rather than a set per
+   tab -- is what lets a search follow you from document to document. */
+struct Window {
+    GtkWidget *window;
+    GtkWidget *notebook;
+    GtkWidget *header;
+    GtkWidget *stepper;      /* the two step buttons, hidden for a document */
+    GtkWidget *counter;
+    GtkWidget *search_bar;
+    GtkWidget *search_entry;
+    GtkWidget *search_counter;
+    gboolean closing;        /* window teardown, not a tab being closed */
+};
+
+static Viewer *current_viewer(Window *win);
+static void close_tab(Window *win);
+static void step_tab(Window *win, int delta);
 
 static char *opt_title = NULL;
 static char *opt_heading = NULL;
@@ -269,7 +288,7 @@ static void run_js(Viewer *viewer, const char *source, const char *call,
 static void navigate(Viewer *viewer, int delta)
 {
     char *call = g_strdup_printf("go(%d)", delta);
-    run_js(viewer, NAV_JS, call, viewer->counter);
+    run_js(viewer, NAV_JS, call, viewer->win->counter);
     g_free(call);
 }
 
@@ -307,7 +326,7 @@ static void find_text(Viewer *viewer, const char *query)
     char *literal = quote_js(query);
     char *call = g_strdup_printf("search(%s)", literal);
 
-    run_js(viewer, FIND_JS, call, viewer->search_counter);
+    run_js(viewer, FIND_JS, call, viewer->win->search_counter);
     g_free(call);
     g_free(literal);
 }
@@ -316,65 +335,76 @@ static void find_text(Viewer *viewer, const char *query)
 static void find_step(Viewer *viewer, int delta)
 {
     char *call = g_strdup_printf("go(%d)", delta);
-    run_js(viewer, FIND_JS, call, viewer->search_counter);
+    run_js(viewer, FIND_JS, call, viewer->win->search_counter);
     g_free(call);
 }
 
-static void open_search(Viewer *viewer)
+static void open_search(Window *win)
 {
-    gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(viewer->search_bar), TRUE);
-    gtk_widget_grab_focus(viewer->search_entry);
+    gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(win->search_bar), TRUE);
+    gtk_widget_grab_focus(win->search_entry);
     /* Reopening on a query already in the box replaces it as you type,
        the way a second Ctrl+F does everywhere else. */
-    gtk_editable_select_region(GTK_EDITABLE(viewer->search_entry), 0, -1);
+    gtk_editable_select_region(GTK_EDITABLE(win->search_entry), 0, -1);
 }
 
-static void close_search(Viewer *viewer)
+static void close_search(Window *win)
 {
-    gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(viewer->search_bar), FALSE);
+    gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(win->search_bar), FALSE);
 }
 
 /* True while the keystroke belongs to the search box rather than the page. */
-static gboolean search_focused(Viewer *viewer, GtkWidget *window)
+static gboolean search_focused(Window *win)
 {
-    GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(window));
+    GtkWidget *focus = gtk_window_get_focus(GTK_WINDOW(win->window));
 
     return focus != NULL
-        && (focus == viewer->search_bar
-            || gtk_widget_is_ancestor(focus, viewer->search_bar));
+        && (focus == win->search_bar
+            || gtk_widget_is_ancestor(focus, win->search_bar));
 }
 
 static void on_search_changed(GtkSearchEntry *entry, gpointer data)
 {
-    find_text(data, gtk_editable_get_text(GTK_EDITABLE(entry)));
+    Viewer *viewer = current_viewer(data);
+
+    if (viewer != NULL)
+        find_text(viewer, gtk_editable_get_text(GTK_EDITABLE(entry)));
 }
 
 static void on_search_step_clicked(GtkButton *button, gpointer data)
 {
-    find_step(data, GPOINTER_TO_INT(
-                  g_object_get_data(G_OBJECT(button), "delta")));
+    Viewer *viewer = current_viewer(data);
+
+    if (viewer != NULL)
+        find_step(viewer, GPOINTER_TO_INT(
+                      g_object_get_data(G_OBJECT(button), "delta")));
 }
 
 /* Closing the bar -- by Escape or by its own close button -- has to drop the
    highlights with it, and hand the keyboard back to the page. */
 static void on_search_mode(GObject *bar, GParamSpec *spec, gpointer data)
 {
-    Viewer *viewer = data;
+    Window *win = data;
+    Viewer *viewer = current_viewer(win);
     (void) spec;
 
     if (gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(bar)))
         return;
-    gtk_editable_set_text(GTK_EDITABLE(viewer->search_entry), "");
-    gtk_label_set_label(GTK_LABEL(viewer->search_counter), "");
+    gtk_editable_set_text(GTK_EDITABLE(win->search_entry), "");
+    gtk_label_set_label(GTK_LABEL(win->search_counter), "");
+    if (viewer == NULL)
+        return;
     find_text(viewer, "");
     gtk_widget_grab_focus(GTK_WIDGET(viewer->webview));
 }
 
 static void on_navigate_clicked(GtkButton *button, gpointer data)
 {
-    Viewer *viewer = data;
-    navigate(viewer, GPOINTER_TO_INT(
-                 g_object_get_data(G_OBJECT(button), "delta")));
+    Viewer *viewer = current_viewer(data);
+
+    if (viewer != NULL)
+        navigate(viewer, GPOINTER_TO_INT(
+                     g_object_get_data(G_OBJECT(button), "delta")));
 }
 
 static void on_load_changed(WebKitWebView *webview, WebKitLoadEvent event,
@@ -387,7 +417,12 @@ static void on_load_changed(WebKitWebView *webview, WebKitLoadEvent event,
        the scrollbar map. */
     if (event == WEBKIT_LOAD_FINISHED) {
         viewer->loaded = TRUE;
-        run_js(viewer, NAV_JS, "label()", viewer->counter);
+        /* A document loading in a tab behind this one still needs the
+           evaluation, which is what builds its scrollbar map -- but the
+           counter it would report belongs to the tab in front. */
+        run_js(viewer, NAV_JS, "label()",
+               viewer == current_viewer(viewer->win) ? viewer->win->counter
+                                                     : NULL);
     }
 }
 
@@ -453,16 +488,16 @@ static WebKitWebView *build_webview(void)
 static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
                        guint keycode, GdkModifierType state, gpointer data)
 {
-    Viewer *viewer = data;
+    Window *win = data;
+    Viewer *viewer = current_viewer(win);
     gboolean ctrl = (state & GDK_CONTROL_MASK) != 0;
     gboolean shift = (state & GDK_SHIFT_MASK) != 0;
     gboolean alt = (state & GDK_ALT_MASK) != 0;
     const char *name = gdk_keyval_name(keyval);
-    GtkWidget *window = gtk_event_controller_get_widget(
-        GTK_EVENT_CONTROLLER(controller));
 
+    (void) controller;
     (void) keycode;
-    if (name == NULL)
+    if (name == NULL || viewer == NULL)
         return FALSE;
 
     /* Ctrl+F and Ctrl+S both open the search bar, from the page or from
@@ -470,15 +505,15 @@ static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
        hand reaches for; nothing in this window saves anything. */
     if (ctrl && (g_ascii_strcasecmp(name, "f") == 0
                  || g_ascii_strcasecmp(name, "s") == 0)) {
-        open_search(viewer);
+        open_search(win);
         return TRUE;
     }
 
     /* While the query is being typed the page keeps none of its bindings:
        "n" and "q" are letters here, not commands. */
-    if (search_focused(viewer, window)) {
+    if (search_focused(win)) {
         if (g_str_equal(name, "Escape"))
-            close_search(viewer);
+            close_search(win);
         else if (g_str_equal(name, "Down")
                  || ((g_str_equal(name, "Return")
                       || g_str_equal(name, "KP_Enter")) && !shift))
@@ -493,13 +528,25 @@ static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
     }
 
     if (g_str_equal(name, "Escape")
-        && gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(viewer->search_bar))) {
+        && gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(win->search_bar))) {
         /* A search left open with the page focused: the first Escape puts
-           it away, a second closes the window. */
-        close_search(viewer);
+           it away, a second closes the document. */
+        close_search(win);
     } else if (g_str_equal(name, "Escape") || g_str_equal(name, "q")
         || (ctrl && g_str_equal(name, "w"))) {
-        gtk_window_close(GTK_WINDOW(window));
+        /* Closes the document in front.  With one open -- every diff, and
+           md-view until a second arrives -- that is the window, which is
+           what these keys have always done. */
+        close_tab(win);
+    } else if (ctrl && (g_str_equal(name, "Page_Down")
+                        || g_str_equal(name, "Next"))) {
+        step_tab(win, 1);
+    } else if (ctrl && (g_str_equal(name, "Page_Up")
+                        || g_str_equal(name, "Prior"))) {
+        step_tab(win, -1);
+    } else if (alt && name[0] >= '1' && name[0] <= '9' && name[1] == '\0') {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook),
+                                      name[0] - '1');
     } else if (viewer->navigation
                && (g_str_equal(name, "n")
                    || (g_str_equal(name, "Tab") && !shift)
@@ -549,7 +596,165 @@ static GtkWidget *build_title(const char *primary, const char *secondary)
     return box;
 }
 
-static void add_stepper(GtkWidget *header, Viewer *viewer)
+/* --- Tabs --- */
+
+static Viewer *viewer_of(GtkWidget *page)
+{
+    return page != NULL ? g_object_get_data(G_OBJECT(page), "viewer") : NULL;
+}
+
+static Viewer *current_viewer(Window *win)
+{
+    int index = gtk_notebook_get_current_page(GTK_NOTEBOOK(win->notebook));
+
+    if (index < 0)
+        return NULL;
+    return viewer_of(gtk_notebook_get_nth_page(GTK_NOTEBOOK(win->notebook),
+                                               index));
+}
+
+/* Point the window's chrome at one document.  Everything here is per-tab
+   but drawn once, so switching tabs means re-pointing rather than swapping
+   widgets in and out. */
+static void sync_chrome(Window *win, Viewer *viewer)
+{
+    if (viewer == NULL)
+        return;
+
+    gtk_window_set_title(GTK_WINDOW(win->window), viewer->title);
+    gtk_header_bar_set_title_widget(
+        GTK_HEADER_BAR(win->header),
+        build_title(viewer->heading, viewer->subheading));
+
+    /* A single file has no changes to step through; a diff does.  Which
+       means the stepper comes and goes with the tab, rather than being
+       settled once when the window is built. */
+    gtk_widget_set_visible(win->stepper, viewer->navigation);
+    gtk_widget_set_visible(win->counter, viewer->navigation);
+    if (viewer->navigation)
+        run_js(viewer, NAV_JS, "label()", win->counter);
+
+    /* An open query follows you from document to document: the bar belongs
+       to the window, so leaving it pointed at the tab you just left would
+       show a count for something no longer on screen. */
+    if (gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(win->search_bar)))
+        find_text(viewer,
+                  gtk_editable_get_text(GTK_EDITABLE(win->search_entry)));
+}
+
+/* Tabs are worth their strip only once there is a choice to make.  One
+   document -- every diff, and md-view until a second arrives -- looks
+   exactly as it did before there were tabs at all. */
+static void update_tabs(Window *win)
+{
+    gtk_notebook_set_show_tabs(
+        GTK_NOTEBOOK(win->notebook),
+        gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) > 1);
+}
+
+static void on_switch_page(GtkNotebook *notebook, GtkWidget *page,
+                           guint index, gpointer data)
+{
+    (void) notebook;
+    (void) index;
+    /* The page argument, not get_current_page(): the notebook has not
+       finished switching while this runs. */
+    sync_chrome(data, viewer_of(page));
+}
+
+static void on_page_removed(GtkNotebook *notebook, GtkWidget *child,
+                            guint index, gpointer data)
+{
+    Window *win = data;
+
+    (void) notebook;
+    (void) child;
+    (void) index;
+    /* Tearing the window down removes every page on the way out; that is
+       not the last tab being closed. */
+    if (win->closing)
+        return;
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) == 0) {
+        gtk_window_destroy(GTK_WINDOW(win->window));
+        return;
+    }
+    update_tabs(win);
+    sync_chrome(win, current_viewer(win));
+}
+
+static void remove_tab(Window *win, GtkWidget *page)
+{
+    int index = gtk_notebook_page_num(GTK_NOTEBOOK(win->notebook), page);
+
+    /* The last document goes out with the window, so that q and Ctrl+W
+       still close a single-document window the way they always have. */
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) <= 1) {
+        gtk_window_close(GTK_WINDOW(win->window));
+        return;
+    }
+    if (index >= 0)
+        gtk_notebook_remove_page(GTK_NOTEBOOK(win->notebook), index);
+}
+
+static void close_tab(Window *win)
+{
+    int index = gtk_notebook_get_current_page(GTK_NOTEBOOK(win->notebook));
+
+    if (index < 0) {
+        gtk_window_close(GTK_WINDOW(win->window));
+        return;
+    }
+    remove_tab(win, gtk_notebook_get_nth_page(GTK_NOTEBOOK(win->notebook),
+                                              index));
+}
+
+static void step_tab(Window *win, int delta)
+{
+    int count = gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook));
+    int index = gtk_notebook_get_current_page(GTK_NOTEBOOK(win->notebook));
+
+    if (count <= 1 || index < 0)
+        return;
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook),
+                                  ((index + delta) % count + count) % count);
+}
+
+static void on_tab_close_clicked(GtkButton *button, gpointer data)
+{
+    GtkWidget *page = data;
+    Viewer *viewer = viewer_of(page);
+
+    (void) button;
+    if (viewer != NULL)
+        remove_tab(viewer->win, page);
+}
+
+static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer)
+{
+    GtkWidget *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *label = gtk_label_new(viewer->title);
+    GtkWidget *close = gtk_button_new_from_icon_name("window-close-symbolic");
+
+    /* Ellipsizing gives a label a minimum width of nothing, so without a
+       floor the tab strip shrinks every name to a bare "...". */
+    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_label_set_width_chars(GTK_LABEL(label), 12);
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 24);
+    gtk_box_append(GTK_BOX(box), label);
+
+    gtk_button_set_has_frame(GTK_BUTTON(close), FALSE);
+    gtk_widget_set_tooltip_text(close, "Close document (Ctrl+W)");
+    g_signal_connect(close, "clicked", G_CALLBACK(on_tab_close_clicked), page);
+    gtk_box_append(GTK_BOX(box), close);
+
+    /* Two files of the same name from different directories are otherwise
+       indistinguishable once the tab strip has ellipsized them. */
+    if (viewer->subheading != NULL && *viewer->subheading != '\0')
+        gtk_widget_set_tooltip_text(label, viewer->subheading);
+    return box;
+}
+
+static void add_stepper(GtkWidget *header, Window *win)
 {
     static const struct {
         const char *icon;
@@ -560,26 +765,32 @@ static void add_stepper(GtkWidget *header, Viewer *viewer)
         { "go-down-symbolic", 1, "Next change (n / Tab / Alt+Down)" },
     };
 
+    /* Built whichever kind of document opens first, and shown or hidden per
+       tab: one window can hold a diff and a file side by side. */
+    win->stepper = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_add_css_class(win->stepper, "linked");
+
     for (gsize i = 0; i < G_N_ELEMENTS(BUTTONS); i++) {
         GtkWidget *button = gtk_button_new_from_icon_name(BUTTONS[i].icon);
         gtk_widget_set_tooltip_text(button, BUTTONS[i].tip);
         g_object_set_data(G_OBJECT(button), "delta",
                           GINT_TO_POINTER(BUTTONS[i].delta));
         g_signal_connect(button, "clicked", G_CALLBACK(on_navigate_clicked),
-                         viewer);
-        gtk_header_bar_pack_start(GTK_HEADER_BAR(header), button);
+                         win);
+        gtk_box_append(GTK_BOX(win->stepper), button);
     }
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), win->stepper);
 
-    viewer->counter = gtk_label_new("…");
-    gtk_widget_add_css_class(viewer->counter, "dim-label");
-    gtk_header_bar_pack_end(GTK_HEADER_BAR(header), viewer->counter);
+    win->counter = gtk_label_new("…");
+    gtk_widget_add_css_class(win->counter, "dim-label");
+    gtk_header_bar_pack_end(GTK_HEADER_BAR(header), win->counter);
 }
 
 /* The search bar sits under the header bar and slides out of the way when
    it is not in use, so a document that is only ever read never pays for it.
-   Unlike the stepper it is built whichever mode we are in: a single file has
-   no changes to step through, but it has words to look for. */
-static void add_search_bar(GtkWidget *content, Viewer *viewer)
+   Unlike the stepper it is never hidden: a single file has no changes to
+   step through, but it has words to look for. */
+static void add_search_bar(GtkWidget *content, Window *win)
 {
     static const struct {
         const char *icon;
@@ -600,16 +811,16 @@ static void add_search_bar(GtkWidget *content, Viewer *viewer)
        bookworm ships 4.8. */
     gtk_widget_set_tooltip_text(entry, "Find in document (Ctrl+F / Ctrl+S)");
     g_signal_connect(entry, "search-changed", G_CALLBACK(on_search_changed),
-                     viewer);
+                     win);
     gtk_box_append(GTK_BOX(row), entry);
 
     /* Wide enough for "no matches" so the buttons beside it hold still as
        the count changes under the typing. */
-    viewer->search_counter = gtk_label_new("");
-    gtk_label_set_width_chars(GTK_LABEL(viewer->search_counter), 11);
-    gtk_label_set_xalign(GTK_LABEL(viewer->search_counter), 1.0);
-    gtk_widget_add_css_class(viewer->search_counter, "dim-label");
-    gtk_box_append(GTK_BOX(row), viewer->search_counter);
+    win->search_counter = gtk_label_new("");
+    gtk_label_set_width_chars(GTK_LABEL(win->search_counter), 11);
+    gtk_label_set_xalign(GTK_LABEL(win->search_counter), 1.0);
+    gtk_widget_add_css_class(win->search_counter, "dim-label");
+    gtk_box_append(GTK_BOX(row), win->search_counter);
 
     for (gsize i = 0; i < G_N_ELEMENTS(BUTTONS); i++) {
         GtkWidget *button = gtk_button_new_from_icon_name(BUTTONS[i].icon);
@@ -617,7 +828,7 @@ static void add_search_bar(GtkWidget *content, Viewer *viewer)
         g_object_set_data(G_OBJECT(button), "delta",
                           GINT_TO_POINTER(BUTTONS[i].delta));
         g_signal_connect(button, "clicked",
-                         G_CALLBACK(on_search_step_clicked), viewer);
+                         G_CALLBACK(on_search_step_clicked), win);
         gtk_box_append(GTK_BOX(row), button);
     }
 
@@ -626,10 +837,10 @@ static void add_search_bar(GtkWidget *content, Viewer *viewer)
     gtk_search_bar_set_show_close_button(GTK_SEARCH_BAR(bar), TRUE);
 
     /* Recorded before the handler that reads them is connected. */
-    viewer->search_bar = bar;
-    viewer->search_entry = entry;
+    win->search_bar = bar;
+    win->search_entry = entry;
     g_signal_connect(bar, "notify::search-mode-enabled",
-                     G_CALLBACK(on_search_mode), viewer);
+                     G_CALLBACK(on_search_mode), win);
     gtk_box_append(GTK_BOX(content), bar);
 }
 
@@ -656,7 +867,40 @@ static void viewer_free(Viewer *viewer)
     g_free(viewer);
 }
 
-static void open_window(GtkApplication *app, Viewer *viewer)
+static void add_tab(Window *win, Viewer *viewer)
+{
+    viewer->win = win;
+    viewer->webview = build_webview();
+    g_signal_connect(viewer->webview, "load-changed",
+                     G_CALLBACK(on_load_changed), viewer);
+    g_signal_connect(viewer->webview, "decide-policy",
+                     G_CALLBACK(on_decide_policy), viewer);
+    webkit_web_view_load_html(viewer->webview, viewer->document->str, NULL);
+
+    GtkWidget *page = GTK_WIDGET(viewer->webview);
+    gtk_widget_set_vexpand(page, TRUE);
+    /* The page owns the document: closing the tab is what frees it, whether
+       that happens by hand or by the window going away. */
+    g_object_set_data_full(G_OBJECT(page), "viewer", viewer,
+                           (GDestroyNotify) viewer_free);
+
+    int index = gtk_notebook_append_page(GTK_NOTEBOOK(win->notebook), page,
+                                         build_tab_label(page, viewer));
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(win->notebook), page, TRUE);
+    update_tabs(win);
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook), index);
+    sync_chrome(win, viewer);
+}
+
+static void on_window_destroy(GtkWidget *widget, gpointer data)
+{
+    Window *win = data;
+
+    (void) widget;
+    win->closing = TRUE;
+}
+
+static Window *window_new(GtkApplication *app)
 {
     /* X11 draws the titlebar and taskbar icon from the _NET_WM_ICON pixmaps
        on the window, and GTK4 only attaches them when the icon is named --
@@ -667,53 +911,63 @@ static void open_window(GtkApplication *app, Viewer *viewer)
     gtk_window_set_default_icon_name(
         g_application_get_application_id(G_APPLICATION(app)));
 
-    GtkWidget *window = gtk_application_window_new(app);
-    gtk_window_set_title(GTK_WINDOW(window), viewer->title);
-    gtk_window_set_default_size(GTK_WINDOW(window), 1100, 850);
+    Window *win = g_new0(Window, 1);
+    win->window = gtk_application_window_new(app);
+    gtk_window_set_default_size(GTK_WINDOW(win->window), 1100, 850);
+    /* Outlives the destroy handler, which still reads it. */
+    g_object_set_data_full(G_OBJECT(win->window), "md-window", win, g_free);
+    g_signal_connect(win->window, "destroy", G_CALLBACK(on_window_destroy),
+                     win);
 
-    /* The window owns the document from here on: in session mode the
-       invocation that supplied it is long gone. */
-    g_signal_connect_swapped(window, "destroy", G_CALLBACK(viewer_free),
-                             viewer);
+    win->header = gtk_header_bar_new();
+    add_stepper(win->header, win);
+    gtk_window_set_titlebar(GTK_WINDOW(win->window), win->header);
 
-    GtkWidget *header = gtk_header_bar_new();
-    gtk_header_bar_set_title_widget(
-        GTK_HEADER_BAR(header),
-        build_title(viewer->heading, viewer->subheading));
-    if (viewer->navigation)
-        add_stepper(header, viewer);
-    gtk_window_set_titlebar(GTK_WINDOW(window), header);
-
-    viewer->webview = build_webview();
-    g_signal_connect(viewer->webview, "load-changed",
-                     G_CALLBACK(on_load_changed), viewer);
-    g_signal_connect(viewer->webview, "decide-policy",
-                     G_CALLBACK(on_decide_policy), viewer);
-    webkit_web_view_load_html(viewer->webview, viewer->document->str, NULL);
+    win->notebook = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(win->notebook), TRUE);
+    gtk_notebook_set_show_border(GTK_NOTEBOOK(win->notebook), FALSE);
+    gtk_notebook_set_show_tabs(GTK_NOTEBOOK(win->notebook), FALSE);
+    g_signal_connect(win->notebook, "switch-page", G_CALLBACK(on_switch_page),
+                     win);
+    g_signal_connect(win->notebook, "page-removed", G_CALLBACK(on_page_removed),
+                     win);
 
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    add_search_bar(content, viewer);
-    gtk_widget_set_vexpand(GTK_WIDGET(viewer->webview), TRUE);
-    gtk_box_append(GTK_BOX(content), GTK_WIDGET(viewer->webview));
-    gtk_window_set_child(GTK_WINDOW(window), content);
+    add_search_bar(content, win);
+    gtk_widget_set_vexpand(win->notebook, TRUE);
+    gtk_box_append(GTK_BOX(content), win->notebook);
+    gtk_window_set_child(GTK_WINDOW(win->window), content);
 
     GtkEventController *keys = gtk_event_controller_key_new();
-    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key), viewer);
+    g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key), win);
     /* CAPTURE, not the default BUBBLE: the WebView holds focus and claims
        arrow keys for scrolling, so Alt+Up/Down would never reach a
        bubble-phase handler.  Keys we don't bind still return FALSE here and
        propagate on, leaving plain Up/Down scrolling intact. */
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
-    gtk_widget_add_controller(window, keys);
+    gtk_widget_add_controller(win->window, keys);
 
-    gtk_window_present(GTK_WINDOW(window));
+    return win;
+}
+
+/* The window a joining document should open in: the one most recently
+   focused, so a tab lands where the eye already is. */
+static Window *session_window(GtkApplication *app)
+{
+    GList *windows = gtk_application_get_windows(app);
+
+    return windows != NULL
+        ? g_object_get_data(G_OBJECT(windows->data), "md-window") : NULL;
 }
 
 /* One process, one document: the document was read before the application
    started, because there is only ever this one. */
 static void on_activate(GtkApplication *app, gpointer data)
 {
-    open_window(app, data);
+    Window *win = window_new(app);
+
+    add_tab(win, data);
+    gtk_window_present(GTK_WINDOW(win->window));
 }
 
 /* Discard the previous invocation's captions.  The option variables are
@@ -763,7 +1017,13 @@ static int on_command_line(GApplication *app, GApplicationCommandLine *cmdline,
         return 1;
     }
 
-    open_window(GTK_APPLICATION(app), viewer_new(document));
+    /* Joins the window already up, if there is one.  A document opening
+       behind the others would be no use, so the window comes forward. */
+    Window *win = session_window(GTK_APPLICATION(app));
+    if (win == NULL)
+        win = window_new(GTK_APPLICATION(app));
+    add_tab(win, viewer_new(document));
+    gtk_window_present(GTK_WINDOW(win->window));
     return 0;
 }
 
