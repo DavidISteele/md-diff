@@ -200,7 +200,7 @@ git config --global diff.tool md-diff
 The same renderer and the same window, without the diff:
 
 ```
-md-view [file.md | -] [--toc] [--new-window] [-o output.html]
+md-view [file.md ... | -] [--toc] [--new-window] [-o output.html]
 ```
 
 `-o` writes standalone HTML and stops; otherwise the file opens in the GUI
@@ -208,6 +208,12 @@ window, with `Ctrl+F` / `Ctrl+S`, `Ctrl` `+` / `-` / `0` and `q` / `Esc` /
 `Ctrl+W` as above. There is nothing to step through in a single file, so the
 change stepper is absent — the search box and the overview strip stay, the
 latter as a scrollbar that doesn't fade. `--no-sandbox` applies here too.
+
+Name several files and they open together, as tabs, in the order given:
+
+```
+md-view chapter-*.md
+```
 
 Documents being read collect in one place: a second `md-view` joins the one
 already running rather than starting its own, and hands the shell back its

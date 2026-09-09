@@ -199,6 +199,20 @@ status=$?
 check "md-view reads markdown from a pipe" $status
 grep -q 'Piped' "$STUB_DIR/doc.0" 2>/dev/null; check "piped document reaches the viewer" $?
 
+# Several files open together; the arguments that cannot mean anything are
+# refused before a viewer is started.
+reset_log
+python3 -m md_diff.view "$REPO_DIR/doc.md" "$WORK/nothing.md" >/dev/null 2>&1
+[[ $? -eq 1 ]]; check "md-view rejects a missing file among several" $?
+[[ ! -s "$STUB_LOG" ]]; check "a missing file starts no viewer at all" $?
+
+reset_log
+printf '# Two\n' > "$WORK/two.md"
+python3 -m md_diff.view "$REPO_DIR/doc.md" "$WORK/two.md" -o "$WORK/both.html" \
+    >/dev/null 2>&1
+[[ $? -eq 1 ]]; check "md-view refuses --output for several files" $?
+[[ ! -s "$STUB_LOG" ]]; check "a refused --output starts no viewer" $?
+
 # --- 4. the real binary blocks ----------------------------------------------
 
 echo
@@ -284,6 +298,15 @@ else
     [[ $(viewers) -eq 1 ]]
     check "the second document joined the running process" $?
 
+    # Never `xwininfo | grep` directly: pipefail reports xwininfo's status,
+    # not grep's, and xwininfo fails whenever a window disappears while it is
+    # walking the tree.  The answer looked like "no such window".
+    window_named() {
+        local tree
+        tree=$(xwininfo -root -tree 2>/dev/null) || true
+        grep -q "\"$1\"" <<<"$tree"
+    }
+
     # One process is only half of it: the document has to be on screen, and
     # in the window that was already open rather than one of its own.
     # Windows are titled by the tab in front, so X can be asked directly.
@@ -296,16 +319,14 @@ else
 
     if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
         for _ in $(seq 20); do
-            xwininfo -root -tree 2>/dev/null | grep -q '"second.md"' && break
+            window_named second.md && break
             sleep 0.25
         done
-        tree=$(xwininfo -root -tree 2>/dev/null)
-        grep -q '"second.md"' <<<"$tree"
+        window_named second.md
         check "the joined document is the tab in front" $?
         [[ $(app_windows) -eq 1 ]]
         check "both documents share one window" $?
-        grep -q '"doc.md"' <<<"$tree"
-        [[ $? -ne 0 ]]
+        ! window_named doc.md
         check "the first document did not keep a window of its own" $?
     else
         note "window checks (no xwininfo)"
@@ -326,8 +347,7 @@ else
         [[ $(viewers) -eq 1 ]]
         check "undocking starts no second process" $?
 
-        tree=$(xwininfo -root -tree 2>/dev/null)
-        grep -q '"second.md"' <<<"$tree" && grep -q '"doc.md"' <<<"$tree"
+        window_named second.md && window_named doc.md
         check "both documents are now on screen at once" $?
     else
         note "undock test (no gapplication)"
@@ -369,7 +389,7 @@ else
     # documents being read.
     if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
         for _ in $(seq 20); do
-            xwininfo -root -tree 2>/dev/null | grep -q 'old . new' && break
+            window_named 'old . new' && break
             sleep 0.25
         done
         # Three: the two md-view windows left by the undock, plus this one.
@@ -379,6 +399,37 @@ else
 
     pkill -x md-diff-view
     wait "$first" "$diff_pid" 2>/dev/null
+    for _ in $(seq 20); do
+        [[ $(viewers) -eq 0 ]] && break
+        sleep 0.25
+    done
+
+    # Several files named at once become tabs in one window, in order.  The
+    # window is titled by the tab in front, and the last one named is the one
+    # left in front, so the title is what says the order came out right.
+    printf '# Third\n\nThird document.\n' > "$WORK/third.md"
+    printf '# Fourth\n\nFourth document.\n' > "$WORK/fourth.md"
+    # It waits, like any md-view that ends up holding the window.
+    timeout 60 python3 -m md_diff.view "$WORK/third.md" "$WORK/fourth.md" \
+        >/dev/null 2>&1 &
+    multi=$!
+    for _ in $(seq 80); do
+        xwininfo -root -tree 2>/dev/null | grep -q '"fourth.md"' && break
+        sleep 0.25
+    done
+    kill -0 "$multi" 2>/dev/null
+    check "md-view holds the window for several files" $?
+    [[ $(viewers) -eq 1 ]]
+    check "several files join the one process" $?
+    [[ $(app_windows) -eq 1 ]]
+    check "several files share one window" $?
+    window_named fourth.md
+    check "the last file named is the tab in front" $?
+    ! window_named third.md
+    check "the first file named is a tab, not a window of its own" $?
+
+    pkill -x md-diff-view
+    sleep 1
 fi
 
 # --- Summary -----------------------------------------------------------------

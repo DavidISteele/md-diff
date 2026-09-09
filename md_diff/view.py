@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Render a single markdown file and open it in the md-diff window.
+"""Render markdown files and open them in the md-diff window.
 
-Usage: md-view [file.md | -] [--toc] [--new-window] [-o output.html]
+Usage: md-view [file.md ... | -] [--toc] [--new-window] [-o output.html]
 
 Markdown can also arrive on stdin -- `pandoc -t gfm x.docx | md-view` --
 either by naming `-` or just by piping, since a file argument is what the
 desktop launcher lacks and stdin is what it has nothing on.
 
+Several files named at once open as tabs in one window, in the order given.
 Documents collect in one md-view: an invocation joins the instance already
 running and returns, rather than opening a window of its own and waiting.
 The diff never does -- see gui.VIEW_APP_ID for why the two stay apart.
@@ -25,10 +26,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from md_diff.ascii_table import convert_ascii_tables
-from md_diff.gui import NAV_CSS, VIEW_APP_ID, show_document
+from md_diff.gui import (NAV_CSS, VIEW_APP_ID, show_document,
+                          spawn_document)
 from md_diff.rich_diff import CSS
 
 # Rules that only apply to a document pandoc built from its own template.
@@ -146,6 +149,104 @@ def piped_input() -> bool:
     return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
 
 
+def session_running(app_id: str) -> bool:
+    """True when an md-view already owns the session name on the bus.
+
+    Asked of the bus rather than guessed from a process listing: the name is
+    what a joining invocation actually looks for, and it is taken slightly
+    after the process starts.
+    """
+    if shutil.which("gdbus") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["gdbus", "call", "--session",
+             "--dest", "org.freedesktop.DBus",
+             "--object-path", "/org/freedesktop/DBus",
+             "--method", "org.freedesktop.DBus.NameHasOwner", app_id],
+            capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and "true" in result.stdout
+
+
+def await_session(app_id: str, timeout: float = 20.0,
+                  holder: subprocess.Popen | None = None) -> bool:
+    """Wait for the session to exist, so later documents join it in order.
+
+    Documents are sent one at a time and appended as they arrive, so the
+    order they open in is the order they were sent -- but only once there is
+    something to send them to.  Without gdbus to ask, a pause is the best
+    that can be done; getting it wrong costs the tab order, nothing more.
+    """
+    if shutil.which("gdbus") is None:
+        time.sleep(1.5)
+        return True
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if session_running(app_id):
+            return True
+        # Gone without taking the name: it failed to start, or a session
+        # appeared while it was starting and it joined that instead.  Either
+        # way there is nothing further to wait for.
+        if holder is not None and holder.poll() is not None:
+            return session_running(app_id)
+        time.sleep(0.1)
+    return False
+
+
+def open_documents(documents: list[tuple[str, str, str]], session: str | None,
+                   no_sandbox: bool) -> int:
+    """Open rendered documents in the viewer, in the order given.
+
+    Without a session each document is its own window and its own process,
+    so they are all started and then waited for.  With one, they are sent
+    one at a time so the tabs come out in the order they were named -- and
+    the first has to have taken the session name before the second is sent,
+    or the two race to become it.
+    """
+    if session is None:
+        started = [spawn_document(document, title, title, where,
+                                  navigation=False, no_sandbox=no_sandbox)
+                   for document, title, where in documents]
+        if any(process is None for process in started):
+            return 1
+        return max((process.wait() for process in started), default=0)
+
+    # Nothing to order, so nothing to wait for: hand it over and let the
+    # invocation stand or fall on its own, exactly as one file always has.
+    if len(documents) == 1:
+        document, title, where = documents[0]
+        return show_document(document, title, title, where, navigation=False,
+                             no_sandbox=no_sandbox, session=session)
+
+    holder = None
+    status = 0
+    for index, (document, title, where) in enumerate(documents):
+        # The invocation that becomes the session runs until its window
+        # closes; waiting for it here would stop the rest being sent.
+        if index == 0 and not session_running(session):
+            holder = spawn_document(document, title, title, where,
+                                    navigation=False, no_sandbox=no_sandbox,
+                                    session=session)
+            if holder is None:
+                return 1
+            if not await_session(session, holder=holder):
+                print("md-view: the viewer did not start", file=sys.stderr)
+                return 1
+            continue
+
+        status = show_document(document, title, title, where,
+                               navigation=False, no_sandbox=no_sandbox,
+                               session=session)
+        if status != 0:
+            return status
+
+    # Whichever invocation is holding the window is the one to wait for.
+    return holder.wait() if holder is not None else status
+
+
 def choose_file() -> Path | None:
     """Ask the desktop for a file, for a launcher that passed none.
 
@@ -175,10 +276,11 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("file", type=Path, nargs="?",
-                        help="Markdown file to render, or - for stdin "
-                             "(without one, piped input is read, and "
-                             "failing that a file chooser opens)")
+    parser.add_argument("file", type=Path, nargs="*",
+                        help="Markdown files to render, or - for stdin "
+                             "(several open as tabs in one window; without "
+                             "any, piped input is read, and failing that a "
+                             "file chooser opens)")
     parser.add_argument("-o", "--output", type=Path, default=None,
                         help="Write the HTML to a file instead of opening it")
     parser.add_argument("--toc", action="store_true",
@@ -191,19 +293,31 @@ def main():
                              "systems that block unprivileged user namespaces")
     args = parser.parse_args()
 
+    files = list(args.file)
+
     # `-` asks for stdin outright; no argument at all takes it only when
     # something is actually piped in, leaving the chooser for the launcher.
-    from_stdin = (str(args.file) == "-" if args.file is not None
+    from_stdin = ([str(path) for path in files] == ["-"] if files
                   else piped_input())
 
-    if args.file is None and not from_stdin:
-        args.file = choose_file()
-        if args.file is None:
+    if not files and not from_stdin:
+        chosen = choose_file()
+        if chosen is None:
             print("md-view: no file given", file=sys.stderr)
             return 1
+        files = [chosen]
 
-    if not from_stdin and not args.file.exists():
-        print(f"Error: {args.file} not found", file=sys.stderr)
+    if not from_stdin:
+        missing = [path for path in files if not path.exists()]
+        for path in missing:
+            print(f"Error: {path} not found", file=sys.stderr)
+        if missing:
+            return 1
+
+    # One output file cannot hold several documents, and quietly rendering
+    # only the first would be the wrong kind of helpful.
+    if args.output is not None and len(files) > 1:
+        print("md-view: --output takes a single file", file=sys.stderr)
         return 1
 
     if shutil.which("pandoc") is None:
@@ -220,23 +334,27 @@ def main():
         # so they get the directory the shell that wrote the pipe was in.
         # That is also what the window shows under the heading, as it does
         # the containing directory for a file.
-        title, where = "stdin", Path.cwd()
+        sources = [(markdown, "stdin", Path.cwd())]
     else:
-        markdown = args.file.read_text()
-        title, where = args.file.name, args.file.resolve().parent
+        sources = [(path.read_text(), path.name, path.resolve().parent)
+                   for path in files]
 
     if args.output is not None:
+        markdown, title, where = sources[0]
         args.output.write_text(
             render_source(markdown, title, where, toc=args.toc))
         print(f"Written to {args.output}")
         return 0
 
-    document = render_source(markdown, title, where, toc=args.toc,
-                             extra_css=NAV_CSS)
+    documents = [(render_source(markdown, title, where, toc=args.toc,
+                                extra_css=NAV_CSS),
+                  title, str(where))
+                 for markdown, title, where in sources]
+
     # Documents being read accumulate in one md-view; diffs never do.
-    return show_document(document, title, title, str(where),
-                         navigation=False, no_sandbox=args.no_sandbox,
-                         session=None if args.new_window else VIEW_APP_ID)
+    return open_documents(documents,
+                          None if args.new_window else VIEW_APP_ID,
+                          args.no_sandbox)
 
 
 if __name__ == "__main__":

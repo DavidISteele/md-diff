@@ -115,6 +115,52 @@ def find_viewer() -> str | None:
     return shutil.which(VIEWER)
 
 
+def viewer_command(title: str, heading: str, subheading: str = "",
+                   navigation: bool = True, no_sandbox: bool = False,
+                   session: str | None = None) -> list[str] | None:
+    """Build the viewer invocation, or None if the viewer is missing."""
+    viewer = find_viewer()
+    if viewer is None:
+        source = Path(__file__).resolve().parent.parent / "viewer"
+        print(VIEWER_MISSING.format(viewer=VIEWER, source=source),
+              file=sys.stderr)
+        return None
+
+    command = [viewer, "--title", title, "--heading", heading]
+    if subheading:
+        command += ["--subheading", subheading]
+    if not navigation:
+        command.append("--no-navigation")
+    if no_sandbox:
+        command.append("--no-sandbox")
+    if session:
+        command += ["--session", session]
+    return command
+
+
+def spawn_document(document: str, title: str, heading: str,
+                   subheading: str = "", navigation: bool = True,
+                   no_sandbox: bool = False,
+                   session: str | None = None) -> subprocess.Popen | None:
+    """Start a viewer on a document without waiting for it to finish.
+
+    For opening several documents at once: the invocation that becomes the
+    session runs until its window closes, so waiting for it would stop the
+    rest from ever being sent.  The document still goes down the pipe here
+    rather than being handed over later -- whoever ends up showing it reads
+    it from this descriptor.
+    """
+    command = viewer_command(title, heading, subheading, navigation,
+                             no_sandbox, session)
+    if command is None:
+        return None
+
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, text=True)
+    process.stdin.write(document)
+    process.stdin.close()
+    return process
+
+
 def show_document(document: str, title: str, heading: str, subheading: str = "",
                   navigation: bool = True, no_sandbox: bool = False,
                   session: str | None = None) -> int:
@@ -134,23 +180,10 @@ def show_document(document: str, title: str, heading: str, subheading: str = "",
     to exit, and an invocation that joined a running window would return
     straight away.
     """
-    viewer = find_viewer()
-    if viewer is None:
-        source = Path(__file__).resolve().parent.parent / "viewer"
-        print(VIEWER_MISSING.format(viewer=VIEWER, source=source),
-              file=sys.stderr)
+    command = viewer_command(title, heading, subheading, navigation,
+                             no_sandbox, session)
+    if command is None:
         return 1
-
-    command = [viewer, "--title", title, "--heading", heading]
-    if subheading:
-        command += ["--subheading", subheading]
-    if not navigation:
-        command.append("--no-navigation")
-    if no_sandbox:
-        command.append("--no-sandbox")
-    if session:
-        command += ["--session", session]
-
     return subprocess.run(command, input=document, text=True).returncode
 
 
