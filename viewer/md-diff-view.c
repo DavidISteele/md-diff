@@ -89,13 +89,24 @@ struct Window {
     GtkWidget *search_bar;
     GtkWidget *search_entry;
     GtkWidget *search_counter;
+    GtkWidget *tabs_button;  /* NULL outside a session */
     gboolean closing;        /* window teardown, not a tab being closed */
 };
+
+/* The tab strip earns its space only when there is a choice to make, so one
+   document hides it -- but a hidden strip is also nothing to drag, and
+   nothing to drop onto, which leaves two single-document windows unable to
+   be recombined.  Hence the pin: it belongs to the session rather than to a
+   window, because docking needs a strip at both ends and asking for it twice
+   would be a poor way to spend a click. */
+static gboolean tabs_pinned = FALSE;
+static gboolean tabs_syncing = FALSE;
 
 static Viewer *current_viewer(Window *win);
 static void close_tab(Window *win);
 static void step_tab(Window *win, int delta);
 static void detach_tab(Window *win);
+static void toggle_tabs(Window *win);
 static Window *window_new(GtkApplication *app);
 static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer);
 
@@ -545,6 +556,8 @@ static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
            md-view until a second arrives -- that is the window, which is
            what these keys have always done. */
         close_tab(win);
+    } else if (ctrl && shift && g_ascii_strcasecmp(name, "b") == 0) {
+        toggle_tabs(win);
     } else if (ctrl && shift && g_ascii_strcasecmp(name, "d") == 0) {
         detach_tab(win);
     } else if (ctrl && (g_str_equal(name, "Page_Down")
@@ -651,14 +664,53 @@ static void sync_chrome(Window *win, Viewer *viewer)
                   gtk_editable_get_text(GTK_EDITABLE(win->search_entry)));
 }
 
-/* Tabs are worth their strip only once there is a choice to make.  One
-   document -- every diff, and md-view until a second arrives -- looks
-   exactly as it did before there were tabs at all. */
+/* One document -- every diff, and md-view until a second arrives -- looks
+   exactly as it did before there were tabs at all, unless the strip has been
+   pinned to move a document between windows. */
 static void update_tabs(Window *win)
 {
     gtk_notebook_set_show_tabs(
         GTK_NOTEBOOK(win->notebook),
-        gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) > 1);
+        tabs_pinned
+        || gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) > 1);
+}
+
+/* Every window at once: a tab needs a strip to leave from and a strip to
+   land on, and those are two different windows. */
+static void refresh_tabs(GtkApplication *app)
+{
+    tabs_syncing = TRUE;
+    for (GList *l = gtk_application_get_windows(app); l != NULL; l = l->next) {
+        Window *win = g_object_get_data(G_OBJECT(l->data), "md-window");
+
+        if (win == NULL)
+            continue;
+        update_tabs(win);
+        if (win->tabs_button != NULL)
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(win->tabs_button),
+                                         tabs_pinned);
+    }
+    tabs_syncing = FALSE;
+}
+
+static void on_tabs_toggled(GtkToggleButton *button, gpointer data)
+{
+    Window *win = data;
+
+    /* Set by refresh_tabs on every other window; only the click counts. */
+    if (tabs_syncing)
+        return;
+    tabs_pinned = gtk_toggle_button_get_active(button);
+    refresh_tabs(gtk_window_get_application(GTK_WINDOW(win->window)));
+}
+
+static void toggle_tabs(Window *win)
+{
+    if (win->tabs_button == NULL)
+        return;
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(win->tabs_button),
+        !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(win->tabs_button)));
 }
 
 static void on_switch_page(GtkNotebook *notebook, GtkWidget *page,
@@ -825,6 +877,23 @@ static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer)
     if (viewer->subheading != NULL && *viewer->subheading != '\0')
         gtk_widget_set_tooltip_text(label, viewer->subheading);
     return box;
+}
+
+/* Only in a session: a diff has one document and nowhere to move it to. */
+static void add_tabs_button(GtkWidget *header, Window *win)
+{
+    GtkWidget *button = gtk_toggle_button_new();
+
+    gtk_button_set_icon_name(GTK_BUTTON(button), "view-list-symbolic");
+    gtk_widget_set_tooltip_text(button,
+                                "Show the tab bar, to drag a document to "
+                                "another window (Ctrl+Shift+B)");
+    /* Set before the handler is connected, so a window opened while the
+       strip is pinned adopts the state without re-announcing it. */
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(button), tabs_pinned);
+    g_signal_connect(button, "toggled", G_CALLBACK(on_tabs_toggled), win);
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), button);
+    win->tabs_button = button;
 }
 
 static void add_stepper(GtkWidget *header, Window *win)
@@ -998,6 +1067,8 @@ static Window *window_new(GtkApplication *app)
                      win);
 
     win->header = gtk_header_bar_new();
+    if (session_mode)
+        add_tabs_button(win->header, win);
     add_stepper(win->header, win);
     gtk_window_set_titlebar(GTK_WINDOW(win->window), win->header);
 
@@ -1066,8 +1137,25 @@ static void on_detach_action(GSimpleAction *action, GVariant *parameter,
         detach_tab(win);
 }
 
+static void on_toggle_tabs_action(GSimpleAction *action, GVariant *parameter,
+                                  gpointer data)
+{
+    GtkApplication *app = data;
+    GtkWindow *active = gtk_application_get_active_window(app);
+    Window *win = active != NULL
+        ? g_object_get_data(G_OBJECT(active), "md-window") : NULL;
+
+    (void) action;
+    (void) parameter;
+    if (win == NULL)
+        win = session_window(app);
+    if (win != NULL)
+        toggle_tabs(win);
+}
+
 static const GActionEntry ACTIONS[] = {
     { "detach-tab", on_detach_action, NULL, NULL, NULL, { 0 } },
+    { "toggle-tabs", on_toggle_tabs_action, NULL, NULL, NULL, { 0 } },
 };
 
 /* One process, one document: the document was read before the application

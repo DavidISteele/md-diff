@@ -333,6 +333,23 @@ else
         note "undock test (no gapplication)"
     fi
 
+    # Pinning the tab strip is what makes two single-document windows
+    # dockable again: each needs a strip, one to drag from and one to drop
+    # onto.  Whether the strip is drawn is not visible from outside the
+    # process, so this asserts what is: the action works and disturbs
+    # nothing.
+    if command -v gapplication >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        gapplication action org.user.local.md-view toggle-tabs >/dev/null 2>&1
+        check "toggle-tabs action is accepted" $?
+        sleep 1
+        [[ $(app_windows) -eq 2 ]]
+        check "pinning the tab strip keeps both windows" $?
+        [[ $(viewers) -eq 1 ]]
+        check "pinning the tab strip starts no process" $?
+    else
+        note "tab pin test (no gapplication)"
+    fi
+
     # The separation that matters: a diff opened while md-view is up gets
     # its own process, and waits.
     python3 -m md_diff.gui "$REPO_DIR/doc.md" "$REPO_DIR/doc.md" \

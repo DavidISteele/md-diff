@@ -76,6 +76,7 @@ attach to — see [WebKit sandbox](#webkit-sandbox). `md-diff-gui` finds it in
 | `Ctrl` `+` / `-` / `0` | Zoom in / out / reset |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next document (md-view) |
 | `Alt+1` … `Alt+9` | Nth document (md-view) |
+| `Ctrl+Shift+B` | Show / hide the tab bar (md-view) |
 | `Ctrl+Shift+D` | Move this document to a window of its own (md-view) |
 | `q`, `Esc`, `Ctrl+W` | Close the document, and the window with the last one |
 
@@ -213,13 +214,21 @@ already running rather than starting its own, and hands the shell back its
 prompt instead of waiting. The first one still waits, being the process that
 holds the window. `--new-window` opts out for a document you want kept apart.
 
-They arrive as tabs, and the tab strip appears only once there is a second
-one — a single document looks exactly as it did before there were tabs.
-Drag a tab out to give that document a window of its own, or onto another
-md-view window to file it there; `Ctrl+Shift+D` does the same without the
-mouse, and so does the `detach-tab` action:
+They arrive as tabs, and the tab strip appears once there is a second one — a
+single document looks exactly as it did before there were tabs. Drag a tab out
+to give that document a window of its own, or onto another md-view window to
+file it there; `Ctrl+Shift+D` does the same without the mouse.
+
+A window down to its last document hides the strip again, which would leave
+nothing to drag and nothing to drop onto. The button in the header bar, or
+`Ctrl+Shift+B`, pins the strip open so a document can still be moved. It
+applies to every md-view window at once, because docking wants a strip at both
+ends — the one being dragged from and the one being dropped onto.
+
+Both are also application actions, for a keybinding of your own or a script:
 
 ```
+gapplication action org.user.local.md-view toggle-tabs
 gapplication action org.user.local.md-view detach-tab
 ```
 
