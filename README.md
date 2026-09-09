@@ -74,7 +74,10 @@ attach to — see [WebKit sandbox](#webkit-sandbox). `md-diff-gui` finds it in
 | `p` / `Shift+Tab` / `Alt+Up` | Previous change |
 | `Ctrl+F`, `Ctrl+S` | Find |
 | `Ctrl` `+` / `-` / `0` | Zoom in / out / reset |
-| `q`, `Esc`, `Ctrl+W` | Close |
+| `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next document (md-view) |
+| `Alt+1` … `Alt+9` | Nth document (md-view) |
+| `Ctrl+Shift+D` | Move this document to a window of its own (md-view) |
+| `q`, `Esc`, `Ctrl+W` | Close the document, and the window with the last one |
 
 The header bar shows the current position in the change list (`3 / 17`) and
 the change you jumped to is outlined.
@@ -209,6 +212,20 @@ Documents being read collect in one place: a second `md-view` joins the one
 already running rather than starting its own, and hands the shell back its
 prompt instead of waiting. The first one still waits, being the process that
 holds the window. `--new-window` opts out for a document you want kept apart.
+
+They arrive as tabs, and the tab strip appears only once there is a second
+one — a single document looks exactly as it did before there were tabs.
+Drag a tab out to give that document a window of its own, or onto another
+md-view window to file it there; `Ctrl+Shift+D` does the same without the
+mouse, and so does the `detach-tab` action:
+
+```
+gapplication action org.user.local.md-view detach-tab
+```
+
+A document keeps its place across the move — the scroll position, the search
+you had open and its match count all survive being dragged from one window to
+another, because the page itself is carried across rather than reloaded.
 
 Diffs never join it. md-diff registers a different GTK application id, so the
 two can't adopt each other's windows — and git difftool depends on that: it

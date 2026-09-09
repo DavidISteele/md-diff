@@ -95,6 +95,9 @@ struct Window {
 static Viewer *current_viewer(Window *win);
 static void close_tab(Window *win);
 static void step_tab(Window *win, int delta);
+static void detach_tab(Window *win);
+static Window *window_new(GtkApplication *app);
+static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer);
 
 static char *opt_title = NULL;
 static char *opt_heading = NULL;
@@ -103,6 +106,10 @@ static gboolean opt_no_navigation = FALSE;
 static gboolean opt_no_sandbox = FALSE;
 static gboolean opt_check_sandbox = FALSE;
 static char *opt_session = NULL;
+/* Settled once, in main.  opt_session is re-parsed for every invocation that
+   joins, so it says what the last one asked for rather than what this
+   process is. */
+static gboolean session_mode = FALSE;
 static char **opt_files = NULL;
 
 /* The text options are G_OPTION_ARG_FILENAME, which GLib hands back as the
@@ -538,6 +545,8 @@ static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
            md-view until a second arrives -- that is the window, which is
            what these keys have always done. */
         close_tab(win);
+    } else if (ctrl && shift && g_ascii_strcasecmp(name, "d") == 0) {
+        detach_tab(win);
     } else if (ctrl && (g_str_equal(name, "Page_Down")
                         || g_str_equal(name, "Next"))) {
         step_tab(win, 1);
@@ -662,6 +671,23 @@ static void on_switch_page(GtkNotebook *notebook, GtkWidget *page,
     sync_chrome(data, viewer_of(page));
 }
 
+/* A page can arrive by being dragged out of another window, in which case
+   the document is still pointed at the chrome it was using a moment ago --
+   which may be on its way out, its last tab having just left. */
+static void on_page_added(GtkNotebook *notebook, GtkWidget *child,
+                          guint index, gpointer data)
+{
+    Window *win = data;
+    Viewer *viewer = viewer_of(child);
+
+    (void) notebook;
+    (void) index;
+    if (viewer != NULL)
+        viewer->win = win;
+    update_tabs(win);
+    sync_chrome(win, current_viewer(win));
+}
+
 static void on_page_removed(GtkNotebook *notebook, GtkWidget *child,
                             guint index, gpointer data)
 {
@@ -717,6 +743,53 @@ static void step_tab(Window *win, int delta)
         return;
     gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook),
                                   ((index + delta) % count + count) % count);
+}
+
+/* A tab dropped on the desktop.  GTK asks for a notebook to put it in, and
+   moves the page itself; all that is needed is somewhere for it to land. */
+static GtkNotebook *on_create_window(GtkNotebook *notebook, GtkWidget *page,
+                                     gpointer data)
+{
+    Window *win = data;
+    Window *fresh;
+
+    (void) notebook;
+    (void) page;
+    fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
+    gtk_window_present(GTK_WINDOW(fresh->window));
+    return GTK_NOTEBOOK(fresh->notebook);
+}
+
+/* The same move without the mouse.  Removing a page drops the notebook's
+   reference, and the document goes with it, so the page is held across the
+   move rather than removed and re-created. */
+static void detach_tab(Window *win)
+{
+    GtkNotebook *notebook = GTK_NOTEBOOK(win->notebook);
+    int index = gtk_notebook_get_current_page(notebook);
+    GtkWidget *page;
+    Viewer *viewer;
+    Window *fresh;
+
+    /* A document already alone in its window has nowhere to go. */
+    if (index < 0 || gtk_notebook_get_n_pages(notebook) <= 1)
+        return;
+
+    page = gtk_notebook_get_nth_page(notebook, index);
+    viewer = viewer_of(page);
+    if (viewer == NULL)
+        return;
+
+    fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
+    g_object_ref(page);
+    gtk_notebook_detach_tab(notebook, page);
+    gtk_notebook_append_page(GTK_NOTEBOOK(fresh->notebook), page,
+                             build_tab_label(page, viewer));
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
+    gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
+    g_object_unref(page);
+
+    gtk_window_present(GTK_WINDOW(fresh->window));
 }
 
 static void on_tab_close_clicked(GtkButton *button, gpointer data)
@@ -887,6 +960,11 @@ static void add_tab(Window *win, Viewer *viewer)
     int index = gtk_notebook_append_page(GTK_NOTEBOOK(win->notebook), page,
                                          build_tab_label(page, viewer));
     gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(win->notebook), page, TRUE);
+    /* Only in a session.  A diff has one document and one window, and git is
+       waiting on the process: there is nothing to drag it to. */
+    if (session_mode)
+        gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(win->notebook), page,
+                                        TRUE);
     update_tabs(win);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook), index);
     sync_chrome(win, viewer);
@@ -927,6 +1005,14 @@ static Window *window_new(GtkApplication *app)
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(win->notebook), TRUE);
     gtk_notebook_set_show_border(GTK_NOTEBOOK(win->notebook), FALSE);
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(win->notebook), FALSE);
+    /* The group name is what lets a tab be dragged from one of these windows
+       into another: GTK will only drop a tab into a notebook sharing it. */
+    if (session_mode)
+        gtk_notebook_set_group_name(GTK_NOTEBOOK(win->notebook), "md-view");
+    g_signal_connect(win->notebook, "create-window",
+                     G_CALLBACK(on_create_window), win);
+    g_signal_connect(win->notebook, "page-added", G_CALLBACK(on_page_added),
+                     win);
     g_signal_connect(win->notebook, "switch-page", G_CALLBACK(on_switch_page),
                      win);
     g_signal_connect(win->notebook, "page-removed", G_CALLBACK(on_page_removed),
@@ -960,6 +1046,30 @@ static Window *session_window(GtkApplication *app)
         ? g_object_get_data(G_OBJECT(windows->data), "md-window") : NULL;
 }
 
+/* Undocking, exposed as an application action as well as a key.  It is the
+   one window operation with no other way in: a document can be opened from a
+   shell and closed from its tab, but only a drag could move it -- and a drag
+   is exactly what a script, or a desktop shortcut, cannot do. */
+static void on_detach_action(GSimpleAction *action, GVariant *parameter,
+                             gpointer data)
+{
+    GtkApplication *app = data;
+    GtkWindow *active = gtk_application_get_active_window(app);
+    Window *win = active != NULL
+        ? g_object_get_data(G_OBJECT(active), "md-window") : NULL;
+
+    (void) action;
+    (void) parameter;
+    if (win == NULL)
+        win = session_window(app);
+    if (win != NULL)
+        detach_tab(win);
+}
+
+static const GActionEntry ACTIONS[] = {
+    { "detach-tab", on_detach_action, NULL, NULL, NULL, { 0 } },
+};
+
 /* One process, one document: the document was read before the application
    started, because there is only ever this one. */
 static void on_activate(GtkApplication *app, gpointer data)
@@ -979,6 +1089,7 @@ static void reset_options(void)
     g_clear_pointer(&opt_heading, g_free);
     g_clear_pointer(&opt_subheading, g_free);
     g_clear_pointer(&opt_files, g_strfreev);
+    g_clear_pointer(&opt_session, g_free);
     opt_no_navigation = FALSE;
 }
 
@@ -1064,7 +1175,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (opt_session != NULL) {
+    session_mode = opt_session != NULL;
+    if (session_mode) {
         /* Nothing is read here.  The document travels as a file descriptor
            to whichever instance shows it, and that may be a process which
            started long before this one -- so the reading belongs there, in
@@ -1077,6 +1189,8 @@ int main(int argc, char **argv)
             opt_session, G_APPLICATION_HANDLES_COMMAND_LINE);
         g_signal_connect(app, "command-line", G_CALLBACK(on_command_line),
                          NULL);
+        g_action_map_add_action_entries(G_ACTION_MAP(app), ACTIONS,
+                                        G_N_ELEMENTS(ACTIONS), app);
         int status = g_application_run(G_APPLICATION(app), argc, argv);
         g_object_unref(app);
         return status;

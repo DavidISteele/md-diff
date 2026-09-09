@@ -311,6 +311,28 @@ else
         note "window checks (no xwininfo)"
     fi
 
+    # Undocking: the tab in front moves to a window of its own.  Driven
+    # through the application action rather than a drag, which is the same
+    # move by the same code and is the only half a script can perform.
+    if command -v gapplication >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
+        gapplication action org.user.local.md-view detach-tab >/dev/null 2>&1
+        check "detach-tab action is accepted" $?
+        for _ in $(seq 20); do
+            [[ $(app_windows) -eq 2 ]] && break
+            sleep 0.25
+        done
+        [[ $(app_windows) -eq 2 ]]
+        check "undocking gives the document a window of its own" $?
+        [[ $(viewers) -eq 1 ]]
+        check "undocking starts no second process" $?
+
+        tree=$(xwininfo -root -tree 2>/dev/null)
+        grep -q '"second.md"' <<<"$tree" && grep -q '"doc.md"' <<<"$tree"
+        check "both documents are now on screen at once" $?
+    else
+        note "undock test (no gapplication)"
+    fi
+
     # The separation that matters: a diff opened while md-view is up gets
     # its own process, and waits.
     python3 -m md_diff.gui "$REPO_DIR/doc.md" "$REPO_DIR/doc.md" \
@@ -333,8 +355,9 @@ else
             xwininfo -root -tree 2>/dev/null | grep -q 'old . new' && break
             sleep 0.25
         done
-        [[ $(app_windows) -eq 2 ]]
-        check "the diff opened a second window rather than a tab" $?
+        # Three: the two md-view windows left by the undock, plus this one.
+        [[ $(app_windows) -eq 3 ]]
+        check "the diff opened a window of its own rather than a tab" $?
     fi
 
     pkill -x md-diff-view
