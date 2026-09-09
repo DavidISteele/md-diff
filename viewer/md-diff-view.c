@@ -90,6 +90,7 @@ struct Window {
     GtkWidget *search_entry;
     GtkWidget *search_counter;
     GtkWidget *tabs_button;  /* NULL outside a session */
+    gboolean tabs_pinned;    /* strip held open, to drag a document out */
     guint refresh;           /* pending idle: see schedule_refresh */
     gboolean closing;        /* window teardown, not a tab being closed */
 };
@@ -100,8 +101,6 @@ struct Window {
    be recombined.  Hence the pin: it belongs to the session rather than to a
    window, because docking needs a strip at both ends and asking for it twice
    would be a poor way to spend a click. */
-static gboolean tabs_pinned = FALSE;
-static gboolean tabs_syncing = FALSE;
 
 static Viewer *current_viewer(Window *win);
 static void close_tab(Window *win);
@@ -710,37 +709,16 @@ static void update_tabs(Window *win)
 {
     gtk_notebook_set_show_tabs(
         GTK_NOTEBOOK(win->notebook),
-        tabs_pinned
+        win->tabs_pinned
         || gtk_notebook_get_n_pages(GTK_NOTEBOOK(win->notebook)) > 1);
-}
-
-/* Every window at once: a tab needs a strip to leave from and a strip to
-   land on, and those are two different windows. */
-static void refresh_tabs(GtkApplication *app)
-{
-    tabs_syncing = TRUE;
-    for (GList *l = gtk_application_get_windows(app); l != NULL; l = l->next) {
-        Window *win = g_object_get_data(G_OBJECT(l->data), "md-window");
-
-        if (win == NULL)
-            continue;
-        update_tabs(win);
-        if (win->tabs_button != NULL)
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(win->tabs_button),
-                                         tabs_pinned);
-    }
-    tabs_syncing = FALSE;
 }
 
 static void on_tabs_toggled(GtkToggleButton *button, gpointer data)
 {
     Window *win = data;
 
-    /* Set by refresh_tabs on every other window; only the click counts. */
-    if (tabs_syncing)
-        return;
-    tabs_pinned = gtk_toggle_button_get_active(button);
-    refresh_tabs(gtk_window_get_application(GTK_WINDOW(win->window)));
+    win->tabs_pinned = gtk_toggle_button_get_active(button);
+    update_tabs(win);
 }
 
 static void toggle_tabs(Window *win)
@@ -889,6 +867,63 @@ static void step_tab(Window *win, int delta)
                                   ((index + delta) % count + count) % count);
 }
 
+/* Take in a document dropped on this window's header bar.
+ *
+ * GtkNotebook offers only its own tab strip as a target, so a window showing
+ * one document -- and so hiding its strip -- would have nowhere for a
+ * dragged tab to land.  This target sits on the window, and a drag over the
+ * header reaches it because nothing there consumes it first.
+ *
+ * The page area is deliberately not covered.  WebKit puts its own target on
+ * the WebView and claims the drag before it can bubble this far; a target on
+ * the page in the capture phase does intercept it, but only by leaving
+ * GtkNotebook's own drop target holding a drop it does not own, and GTK then
+ * logs an assertion failure for every motion event of the drag.
+ */
+static gboolean on_drop_page(GtkDropTarget *target, const GValue *value,
+                             double x, double y, gpointer data)
+{
+    Window *win = data;
+    GtkNotebookPage *dropped;
+    GtkWidget *child, *source;
+    Viewer *viewer;
+
+    (void) target;
+    (void) x;
+    (void) y;
+    if (!G_VALUE_HOLDS(value, GTK_TYPE_NOTEBOOK_PAGE))
+        return FALSE;
+
+    dropped = g_value_get_object(value);
+    if (dropped == NULL)
+        return FALSE;
+    child = gtk_notebook_page_get_child(dropped);
+    source = child != NULL ? gtk_widget_get_ancestor(child, GTK_TYPE_NOTEBOOK)
+                           : NULL;
+    viewer = viewer_of(child);
+    if (source == NULL || viewer == NULL)
+        return FALSE;
+
+    /* Dropped back where it came from: accepted, and nothing to do. */
+    if (source == win->notebook)
+        return TRUE;
+
+    /* Held across the move: detaching drops the notebook's reference, and
+       the document would go with it. */
+    g_object_ref(child);
+    gtk_notebook_detach_tab(GTK_NOTEBOOK(source), child);
+    int landed = gtk_notebook_append_page(GTK_NOTEBOOK(win->notebook), child,
+                                          build_tab_label(child, viewer));
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(win->notebook), child, TRUE);
+    gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(win->notebook), child, TRUE);
+    g_object_unref(child);
+
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook), landed);
+    gtk_window_present(GTK_WINDOW(win->window));
+    sync_chrome(win, viewer);
+    return TRUE;
+}
+
 /* A tab dropped on the desktop.  GTK asks for a notebook to put it in, and
    moves the page itself; all that is needed is somewhere for it to land. */
 static GtkNotebook *on_create_window(GtkNotebook *notebook, GtkWidget *page,
@@ -990,11 +1025,8 @@ static void add_tabs_button(GtkWidget *header, Window *win)
 
     gtk_button_set_icon_name(GTK_BUTTON(button), "view-list-symbolic");
     gtk_widget_set_tooltip_text(button,
-                                "Show the tab bar, to drag a document to "
+                                "Show the tab bar, to drag this document to "
                                 "another window (Ctrl+Shift+B)");
-    /* Set before the handler is connected, so a window opened while the
-       strip is pinned adopts the state without re-announcing it. */
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(button), tabs_pinned);
     g_signal_connect(button, "toggled", G_CALLBACK(on_tabs_toggled), win);
     gtk_header_bar_pack_start(GTK_HEADER_BAR(header), button);
     win->tabs_button = button;
@@ -1203,6 +1235,15 @@ static Window *window_new(GtkApplication *app)
     gtk_widget_set_vexpand(win->notebook, TRUE);
     gtk_box_append(GTK_BOX(content), win->notebook);
     gtk_window_set_child(GTK_WINDOW(win->window), content);
+
+    if (session_mode) {
+        /* On the window, not the notebook: the notebook's own target covers
+           the tab strip, and this one takes the header. */
+        GtkDropTarget *drop = gtk_drop_target_new(GTK_TYPE_NOTEBOOK_PAGE,
+                                                  GDK_ACTION_MOVE);
+        g_signal_connect(drop, "drop", G_CALLBACK(on_drop_page), win);
+        gtk_widget_add_controller(win->window, GTK_EVENT_CONTROLLER(drop));
+    }
 
     GtkEventController *keys = gtk_event_controller_key_new();
     g_signal_connect(keys, "key-pressed", G_CALLBACK(on_key), win);

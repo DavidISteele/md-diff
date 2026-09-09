@@ -226,10 +226,10 @@ to give that document a window of its own, or onto another md-view window to
 file it there; `Ctrl+Shift+D` does the same without the mouse.
 
 A window down to its last document hides the strip again, which would leave
-nothing to drag and nothing to drop onto. The button in the header bar, or
-`Ctrl+Shift+B`, pins the strip open so a document can still be moved. It
-applies to every md-view window at once, because docking wants a strip at both
-ends — the one being dragged from and the one being dropped onto.
+nothing to take hold of. The button in the header bar, or `Ctrl+Shift+B`, pins
+that window's strip open so its document can still be dragged out. Only the
+window being dragged *from* needs it: a window takes a dropped tab on its
+header bar, so the one being dropped onto needs no strip at all.
 
 Both are also application actions, for a keybinding of your own or a script:
 
