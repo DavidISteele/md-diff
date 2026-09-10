@@ -1,10 +1,16 @@
 # md-diff
 
-Rendered markdown diff — like GitHub's Rich Diff, but locally.
+This project started out as a rendered markdown diff tool — like GitHub's
+Rich Diff, but locally.
 
-Takes two markdown files, renders them to HTML via pandoc, and produces a
+It takes two markdown files, renders them to HTML via pandoc, and produces a
 structural diff of the rendered output. The result is a standalone HTML file
 with inline additions and deletions highlighted in context.
+
+Structured ascii tables and diagrams are parsed and tidied up, and where
+possible, rendered using box drawing characters for a cleaner ouput.
+
+It now also has a markdown viewer, with dockable tabs for multiple docs.
 
 ## Installation
 
@@ -13,7 +19,7 @@ Everything comes from distribution packages. On Debian or Ubuntu:
 ```
 sudo apt install pandoc python3-lxml                                 # renderer and diff
 sudo apt install build-essential libgtk-4-dev libwebkitgtk-6.0-dev   # the window
-make -C viewer
+make -C viewer                                                       # Build the gui (optional)
 ```
 
 lxml is the only third-party import and the rest of the package is the
@@ -57,7 +63,6 @@ Opens the same rendered diff in a window, so there's no round-trip through
 a browser:
 
 ```
-make -C viewer          # once: builds the window
 md-diff-gui old.md new.md
 ```
 
@@ -202,41 +207,35 @@ git config --global difftool.md-diff.cmd '~/bin/md-diff.sh "$LOCAL" "$REMOTE" "$
 git config --global diff.tool md-diff
 ```
 
-### Viewing a single file
-
-The same renderer and the same window, without the diff:
+### Viewing a markdown file
 
 ```
 md-view [file.md ... | -] [--toc] [--new-window] [-o output.html]
 ```
 
-`-o` writes standalone HTML and stops; otherwise the file opens in the GUI
-window, with `Ctrl+F` / `Ctrl+S`, `Ctrl` `+` / `-` / `0` and `q` / `Esc` /
-`Ctrl+W` as above. There is nothing to step through in a single file, so the
-change stepper is absent — the search box and the overview strip stay, the
+`-o` converts the markdown to standalone HTML and stops.
+
+Otherwise, the file opens in the GUI window, with `Ctrl+F` / `Ctrl+S`,
+`Ctrl` `+` / `-` / `0` and `q` / `Esc` / `Ctrl+W` as above. The stepping
+chrome is absent — the search box and the overview strip stay, the
 latter as a scrollbar that doesn't fade. `--no-sandbox` applies here too.
 
-Name several files and they open together, as tabs, in the order given:
+Multiple files can be passed in together, and they are rendered using tabs,
+in order.
 
 ```
 md-view chapter-*.md
 ```
 
-Documents being read collect in one place: a second `md-view` joins the one
-already running rather than starting its own, and hands the shell back its
-prompt instead of waiting. The first one still waits, being the process that
-holds the window. `--new-window` opts out for a document you want kept apart.
+Invoking md-view a second time will add a new tab to the existing window and
+immediately return. If this behaviour is not desired, `--new-window` will open
+the document in it's own window, and block.
 
-They arrive as tabs, and the tab strip appears once there is a second one — a
-single document looks exactly as it did before there were tabs. Drag a tab out
-to give that document a window of its own, or onto another md-view window to
-file it there; `Ctrl+Shift+D` does the same without the mouse.
-
-A window down to its last document hides the strip again, which would leave
-nothing to take hold of. The button in the header bar, or `Ctrl+Shift+B`, pins
-that window's strip open so its document can still be dragged out. Only the
-window being dragged *from* needs it: a dropped tab is taken anywhere on the
-window it lands on, so the one being dropped onto needs no strip at all.
+Tabs are undockable - just drag the tab out the the desktop to give it it's
+own window, or use `Ctrl-Shift-D`.
+You can also drag the tab onto a different md-view window.
+To re-dock a document that has no tab, use the button in the title bar to show
+the tab-strip (or `Ctrl-Shift-B`), and it's tab will re-appear.
 
 Both are also application actions, for a keybinding of your own or a script:
 
@@ -260,9 +259,9 @@ relative images have no base URI to resolve against and must be inlined. Both
 paths share one stylesheet, so a document reads the same viewed as it does
 diffed — ASCII diagrams included.
 
-#### Piping markdown in
+#### Piping in markdown
 
-Markdown that never was a file can go in on stdin, which puts the window at
+Generated Markdown can be piped in via stdin, which puts the window at
 the end of a pipeline:
 
 ```
@@ -353,87 +352,6 @@ Handles complex box-drawing diagrams including:
 - Multi-line cells merged into logical rows
 - Sections with varying column counts (colspan)
 
-## Known issues
-
-### GtkNotebook's tab drag is broken in GTK 4.8, and is not used
-
-Dragging one of GtkNotebook's own tabs out to a new window corrupts the strip
-it leaves behind: the tab switched to is not repainted, its neighbour loses an
-edge, and dropping a tab into its own content area can crash the window. It
-needs four or more open documents to show reliably, and once triggered it
-repeats until the window is closed.
-
-This is GTK's, not this project's. `tests/notebook-repro.c` is a stock
-`GtkNotebook` with plain labels, detachable tabs and the smallest possible
-`create-window` handler -- no WebKit, nothing from here -- and it corrupts its
-own strip the same way:
-
-```
-cc -O2 -Wall $(pkg-config --cflags gtk4) -o /tmp/notebook-repro \
-   tests/notebook-repro.c $(pkg-config --libs gtk4)
-/tmp/notebook-repro          # drag a tab out, then switch tabs
-```
-
-Debian 12 pins GTK to 4.8.3 (September 2022), where the GTK4 notebook's
-drag-and-drop was newest and least settled. It is no better in 4.14.
-
-So none of it is used. The notebook's tabs are neither detachable nor
-reorderable, there is no tab group and no `create-window` handler, and
-dragging a document between windows is built here instead, out of an ordinary
-`GtkDragSource` on the tab and a `GtkDropTarget` on the window -- which are
-not affected. The move itself is the same detach-and-append the keyboard has
-always used. What is lost is reordering tabs within a strip, which was
-GtkNotebook's to provide.
-
-Two things that follow, and are worth knowing before changing them back:
-
-- **WebKit's own drop target is removed from each view** (`release_web_view_drops`).
-  It claims a drag before one can reach the window beneath, and a drop over
-  the page area is then delivered seconds late and reported as having found
-  no target. Nothing can be dropped into a rendered document, so the view has
-  no use for it.
-- **GPU compositing is off** (`WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`).
-  Reparenting a view into another window takes its compositing surface away,
-  and WebKit does not paint into the new one until the page is dirtied -- a
-  scroll will do it, but a document too short to scroll simply stays blank.
-  These are pages of static text; the GPU context per tab bought nothing.
-
-`MD_DIFF_DEBUG=1` reports every window, move, drag and drop with a timestamp,
-plus the size, visibility and mapping of every tab label. The order and the
-gap between a drag reporting itself cancelled and the drop arriving is what
-distinguishes a document let go over the desktop from one that landed
-somewhere -- which is not obvious from the screen, and cost a long time to
-learn.
-
-### GtkNotebook takes the keyboard when the current page changes
-
-Whenever the notebook's current page changes it grabs the focus for itself,
-and the document behind it goes deaf. The scroll keys reach the notebook,
-which does nothing with them; `Left` and `Right` reach GtkNotebook's own
-arrow keynav, which walks the tabs. Clicking the page hands the focus to
-WebKit and the two swap over — the document scrolls, and the arrows stop
-moving between tabs. It reads like WebKit and GTK disagreeing over the
-keyboard, and is neither of them.
-
-`sync_chrome` hands the focus back, being the one place every route to a new
-front document already goes through — switching a tab, opening one, taking a
-drop from another window, settling after a drag. A query being typed keeps
-the keyboard, since switching tabs mid-search should not empty the box under
-your hands. Clicking the tab that is *already* current raises no
-`switch-page` to hand anything back, so a `notify::focus-widget` handler
-bounces the focus off the notebook as well.
-
-Two things worth knowing before changing it:
-
-- **Making the notebook unfocusable is not the tidier fix.** The focus is
-  then stranded inside the outgoing page's view, and clicking a tab leaves
-  the keyboard pointed at the document you just left — worse than the
-  problem, and quieter.
-- **Nothing is taken from WebKit.** The key controller runs on the capture
-  phase, so a key the window binds already outranks the page and stealing
-  the rest buys no priority. What is left to WebKit is scrolling sized to the
-  real viewport, horizontal scrolling inside wide tables and code blocks, and
-  `Ctrl+C` over a selection that only the web process can copy.
 
 ## Dependencies
 
