@@ -18,6 +18,7 @@
  */
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 
 #include <gtk/gtk.h>
@@ -92,6 +93,7 @@ struct Window {
     GtkWidget *tabs_button;  /* NULL outside a session */
     gboolean tabs_pinned;    /* strip held open, to drag a document out */
     guint refresh;           /* pending idle: see schedule_refresh */
+    int id;                  /* only so diagnostics can name it */
     gboolean closing;        /* window teardown, not a tab being closed */
 };
 
@@ -494,6 +496,15 @@ static WebKitWebView *build_webview(void)
        stepper and the map. */
     webkit_settings_set_enable_javascript_markup(settings, FALSE);
     webkit_settings_set_enable_webgl(settings, FALSE);
+    /* A document moved to another window is reparented, which takes its
+       accelerated compositing surface away, and WebKit does not paint into
+       the new one until something dirties the page -- a scroll will do it,
+       but a document short enough not to scroll has no way back and simply
+       stays blank.  These are pages of static text: compositing them on the
+       GPU buys nothing, and costs a context per open tab.  Without it there
+       is no surface to lose. */
+    webkit_settings_set_hardware_acceleration_policy(
+        settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
     webkit_settings_set_enable_media(settings, FALSE);
     webkit_settings_set_enable_html5_local_storage(settings, FALSE);
     webkit_settings_set_enable_html5_database(settings, FALSE);
@@ -635,25 +646,52 @@ static Viewer *current_viewer(Window *win)
                                                index));
 }
 
-/* Report what the tab strip actually looks like, for a fault that only
-   appears on a desktop this cannot be reproduced on.  Set MD_DIFF_DEBUG_TABS
-   to switch it on; it says nothing otherwise.
+/* Diagnostics for faults that only appear on a desktop, which this cannot be
+   reproduced on: set MD_DIFF_DEBUG and every window move, drag and tab state
+   is reported with a timestamp.  It says nothing otherwise.
 
-   A label that is 0 wide is a layout failure -- the strip has not been
-   re-allocated.  One that is not visible or not mapped is a visibility
-   failure.  The two want opposite fixes, and the symptom looks the same. */
+   The timestamps matter as much as the events.  A drag reports itself
+   cancelled before the drop that took the document is delivered, so the
+   order and the gap between them is what says whether a stray window came
+   from a real "let go over the desktop" or from a drop that arrived late. */
+static gboolean debugging(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+        enabled = g_getenv("MD_DIFF_DEBUG") != NULL;
+    return enabled;
+}
+
+G_GNUC_PRINTF(1, 2)
+static void debug_log(const char *format, ...)
+{
+    va_list args;
+
+    if (!debugging())
+        return;
+    g_printerr("[md-diff %10.3f] ", g_get_monotonic_time() / 1e6);
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+    g_printerr("\n");
+}
+
+/* A label 0 wide is a layout failure -- the strip has not been re-allocated.
+   One not visible or not mapped is a visibility failure.  The two want
+   opposite fixes, and on screen they look the same. */
 static void debug_tabs(Window *win, const char *when)
 {
     GtkNotebook *notebook = GTK_NOTEBOOK(win->notebook);
     int count;
 
-    if (g_getenv("MD_DIFF_DEBUG_TABS") == NULL)
+    if (!debugging())
         return;
 
     count = gtk_notebook_get_n_pages(notebook);
-    g_printerr("[tabs] %s: pages=%d show_tabs=%d current=%d\n", when, count,
-               gtk_notebook_get_show_tabs(notebook),
-               gtk_notebook_get_current_page(notebook));
+    debug_log("tabs %s: window %d pages=%d show_tabs=%d current=%d", when,
+              win->id, count, gtk_notebook_get_show_tabs(notebook),
+              gtk_notebook_get_current_page(notebook));
     for (int i = 0; i < count; i++) {
         GtkWidget *page = gtk_notebook_get_nth_page(notebook, i);
         GtkWidget *label = gtk_notebook_get_tab_label(notebook, page);
@@ -867,120 +905,210 @@ static void step_tab(Window *win, int delta)
                                   ((index + delta) % count + count) % count);
 }
 
-/* Take in a document dropped on this window's header bar.
+/* --- Moving a document between windows ---
  *
- * GtkNotebook offers only its own tab strip as a target, so a window showing
- * one document -- and so hiding its strip -- would have nowhere for a
- * dragged tab to land.  This target sits on the window, and a drag over the
- * header reaches it because nothing there consumes it first.
+ * GtkNotebook can drag its own tabs between notebooks, and in GTK 4.8 doing
+ * so corrupts the strip it leaves: see README, Known issues, and
+ * tests/notebook-repro.c, which fails with plain labels and no WebKit
+ * anywhere near it.  So its machinery is left switched off -- no group name,
+ * no detachable tabs, no create-window -- and the gesture is built here out
+ * of an ordinary drag source and drop target, which are not affected.
  *
- * The page area is deliberately not covered.  WebKit puts its own target on
- * the WebView and claims the drag before it can bubble this far; a target on
- * the page in the capture phase does intercept it, but only by leaving
- * GtkNotebook's own drop target holding a drop it does not own, and GTK then
- * logs an assertion failure for every motion event of the drag.
+ * What moves the page is the same detach-and-append the keyboard has always
+ * used, and that has never misbehaved.
  */
+
+/* Held across the move: detaching drops the notebook's reference, and the
+   document would go with it. */
+static void move_page_into(Window *dest, GtkWidget *page)
+{
+    Viewer *viewer = viewer_of(page);
+    Window *from;
+    GtkWidget *source;
+    int landed;
+
+    if (viewer == NULL)
+        return;
+    source = gtk_widget_get_ancestor(page, GTK_TYPE_NOTEBOOK);
+    if (source == NULL || source == dest->notebook)
+        return;
+    from = viewer->win;   /* re-pointed at dest by page-added, so read now */
+
+    g_object_ref(page);
+    gtk_notebook_detach_tab(GTK_NOTEBOOK(source), page);
+    landed = gtk_notebook_append_page(GTK_NOTEBOOK(dest->notebook), page,
+                                      build_tab_label(page, viewer));
+    /* Named explicitly rather than left to the notebook: without a current
+       page there is no current document, and the window would keep the
+       default caption instead of the document's. */
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(dest->notebook), landed);
+    g_object_unref(page);
+
+    debug_log("moved \"%s\" from window %d to window %d (%d pages there now)",
+              viewer->title, from != NULL ? from->id : -1, dest->id,
+              gtk_notebook_get_n_pages(GTK_NOTEBOOK(dest->notebook)));
+
+    gtk_window_present(GTK_WINDOW(dest->window));
+    sync_chrome(dest, viewer);
+
+    /* Taking the last document out of a window leaves nothing to show.  Said
+       here rather than left to the window's own page-removed handler, which
+       is deferred and can be outrun by the next move. */
+    if (from != NULL && from != dest
+        && gtk_notebook_get_n_pages(GTK_NOTEBOOK(from->notebook)) == 0
+        && !from->closing)
+        gtk_window_destroy(GTK_WINDOW(from->window));
+}
+
+static void move_page_to_new_window(GtkWidget *page)
+{
+    Viewer *viewer = viewer_of(page);
+    Window *fresh;
+
+    if (viewer == NULL || viewer->win == NULL)
+        return;
+    /* A document already alone in its window has nowhere to go. */
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(viewer->win->notebook)) <= 1) {
+        debug_log("detach refused: \"%s\" is alone in window %d",
+                  viewer->title, viewer->win->id);
+        return;
+    }
+
+    fresh = window_new(gtk_window_get_application(
+                           GTK_WINDOW(viewer->win->window)));
+    gtk_window_present(GTK_WINDOW(fresh->window));
+    move_page_into(fresh, page);
+}
+
+/* The window is the drop target, so a document can be dropped anywhere on
+   it -- header bar or page.  WebKit puts its own target on the WebView, but
+   it wants text and files; a drag offering a widget is not something it
+   claims, so this one reaches the window underneath. */
 static gboolean on_drop_page(GtkDropTarget *target, const GValue *value,
                              double x, double y, gpointer data)
 {
     Window *win = data;
-    GtkNotebookPage *dropped;
-    GtkWidget *child, *source;
-    Viewer *viewer;
+    GtkWidget *page;
 
     (void) target;
     (void) x;
     (void) y;
-    if (!G_VALUE_HOLDS(value, GTK_TYPE_NOTEBOOK_PAGE))
+    if (!G_VALUE_HOLDS(value, GTK_TYPE_WIDGET))
         return FALSE;
 
-    dropped = g_value_get_object(value);
-    if (dropped == NULL)
-        return FALSE;
-    child = gtk_notebook_page_get_child(dropped);
-    source = child != NULL ? gtk_widget_get_ancestor(child, GTK_TYPE_NOTEBOOK)
-                           : NULL;
-    viewer = viewer_of(child);
-    if (source == NULL || viewer == NULL)
+    page = g_value_get_object(value);
+    if (page == NULL || viewer_of(page) == NULL)
         return FALSE;
 
-    /* Dropped back where it came from: accepted, and nothing to do. */
-    if (source == win->notebook)
-        return TRUE;
+    debug_log("drop received by window %d: \"%s\"", win->id,
+              viewer_of(page)->title);
 
-    /* Held across the move: detaching drops the notebook's reference, and
-       the document would go with it. */
-    g_object_ref(child);
-    gtk_notebook_detach_tab(GTK_NOTEBOOK(source), child);
-    int landed = gtk_notebook_append_page(GTK_NOTEBOOK(win->notebook), child,
-                                          build_tab_label(child, viewer));
-    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(win->notebook), child, TRUE);
-    gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(win->notebook), child, TRUE);
-    g_object_unref(child);
+    /* Something took it after all: whatever the drag reported, this is not a
+       document let go over the desktop. */
+    guint pending = GPOINTER_TO_UINT(
+        g_object_get_data(G_OBJECT(page), "pending-detach"));
+    if (pending != 0) {
+        debug_log("  the drop called off the pending detach");
+        g_source_remove(pending);
+        g_object_set_data(G_OBJECT(page), "pending-detach", NULL);
+    }
 
-    gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook), landed);
-    gtk_window_present(GTK_WINDOW(win->window));
-    sync_chrome(win, viewer);
+    move_page_into(win, page);
     return TRUE;
 }
 
-/* A tab dropped on the desktop.  GTK asks for a notebook to put it in, and
-   moves the page itself; all that is needed is somewhere for it to land. */
-static GtkNotebook *on_create_window(GtkNotebook *notebook, GtkWidget *page,
-                                     gpointer data)
+static GdkContentProvider *on_drag_prepare(GtkDragSource *source, double x,
+                                           double y, gpointer data)
 {
-    Window *win = data;
-    Window *fresh;
+    GtkWidget *page = data;
 
-    (void) notebook;
-    (void) page;
-    fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
-    /* Presented here, before the notebook is handed back: GTK is going to
-       put a page into it straight away, and a window that has never been
-       realised is not somewhere to put one. */
-    gtk_window_present(GTK_WINDOW(fresh->window));
-    return GTK_NOTEBOOK(fresh->notebook);
+    (void) source;
+    (void) x;
+    (void) y;
+    if (viewer_of(page) == NULL)
+        return NULL;
+    return gdk_content_provider_new_typed(GTK_TYPE_WIDGET, page);
 }
 
-/* The same move without the mouse.  Removing a page drops the notebook's
-   reference, and the document goes with it, so the page is held across the
-   move rather than removed and re-created. */
+/* The tab itself is what is dragged, so it is what should follow the
+   pointer. */
+static void on_drag_begin(GtkDragSource *source, GdkDrag *drag, gpointer data)
+{
+    GtkWidget *page = data;
+    GtkWidget *tab = gtk_event_controller_get_widget(
+        GTK_EVENT_CONTROLLER(source));
+    GdkPaintable *icon = gtk_widget_paintable_new(tab);
+
+    (void) drag;
+    gtk_drag_source_set_icon(source, icon, 0, 0);
+    g_object_unref(icon);
+
+    debug_log("drag begin: \"%s\" from window %d",
+              viewer_of(page)->title, viewer_of(page)->win->id);
+
+    /* Remembered so the cancel handler can tell a drop that landed
+       somewhere from one that landed nowhere: see on_drag_cancel. */
+    g_object_set_data(G_OBJECT(page), "drag-origin",
+                      gtk_widget_get_ancestor(page, GTK_TYPE_NOTEBOOK));
+}
+
+/* Let go where nothing took it: that is the gesture for giving a document a
+   window of its own.  If it has left the notebook it started in, something
+   did take it, and moving it again would tear it straight back out of the
+   window it was just dropped into. */
+static gboolean detach_if_unmoved(gpointer data)
+{
+    GtkWidget *page = data;
+
+    g_object_set_data(G_OBJECT(page), "pending-detach", NULL);
+    debug_log("detach check: still where the drag started=%d",
+              gtk_widget_get_ancestor(page, GTK_TYPE_NOTEBOOK)
+              == g_object_get_data(G_OBJECT(page), "drag-origin"));
+
+    if (viewer_of(page) != NULL
+        && gtk_widget_get_ancestor(page, GTK_TYPE_NOTEBOOK)
+           == g_object_get_data(G_OBJECT(page), "drag-origin"))
+        move_page_to_new_window(page);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_drag_cancel(GtkDragSource *source, GdkDrag *drag,
+                               GdkDragCancelReason reason, gpointer data)
+{
+    GtkWidget *page = data;
+
+    (void) source;
+    (void) drag;
+    debug_log("drag cancel: reason=%d%s", reason,
+              reason == GDK_DRAG_CANCEL_NO_TARGET ? " (nothing took it)" : "");
+    if (reason != GDK_DRAG_CANCEL_NO_TARGET)
+        return FALSE;
+
+    /* Not decided here.  A drop taken by a page's own target in the capture
+       phase still reports the drag as having found no target, and this runs
+       *before* that drop is delivered -- so at this moment a document that
+       is about to land in another window looks exactly like one let go over
+       the desktop.  An idle runs after the drop, when the two can be told
+       apart by where the document actually is.  An idle is too early: the
+       drop arrives in a later iteration of the loop than the cancel, and
+       under a synthetic pointer it can be later still -- so a drop that
+       arrives after this has fired calls the detach off itself. */
+    g_object_set_data(G_OBJECT(page), "pending-detach",
+                      GUINT_TO_POINTER(g_timeout_add(SETTLE_MS,
+                                                     detach_if_unmoved,
+                                                     page)));
+    return TRUE;
+}
+
+/* The same move without the mouse. */
 static void detach_tab(Window *win)
 {
-    GtkNotebook *notebook = GTK_NOTEBOOK(win->notebook);
-    int index = gtk_notebook_get_current_page(notebook);
-    GtkWidget *page;
-    Viewer *viewer;
-    Window *fresh;
+    int index = gtk_notebook_get_current_page(GTK_NOTEBOOK(win->notebook));
 
-    /* A document already alone in its window has nowhere to go. */
-    if (index < 0 || gtk_notebook_get_n_pages(notebook) <= 1)
+    if (index < 0)
         return;
-
-    page = gtk_notebook_get_nth_page(notebook, index);
-    viewer = viewer_of(page);
-    if (viewer == NULL)
-        return;
-
-    fresh = window_new(gtk_window_get_application(GTK_WINDOW(win->window)));
-    g_object_ref(page);
-    gtk_notebook_detach_tab(notebook, page);
-    int moved = gtk_notebook_append_page(GTK_NOTEBOOK(fresh->notebook), page,
-                                         build_tab_label(page, viewer));
-    /* Named explicitly rather than left to the notebook: without a current
-       page there is no current document, and the window keeps the default
-       caption instead of the document's. */
-    gtk_notebook_set_current_page(GTK_NOTEBOOK(fresh->notebook), moved);
-    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
-    gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(fresh->notebook), page, TRUE);
-    g_object_unref(page);
-
-    /* Not a drag, so nothing to wait for: the new window can be captioned
-       now.  Leaving it to the refresh would show the default title until
-       that fires, and a switch-page raised by the move is ignored while a
-       refresh is pending. */
-    gtk_window_present(GTK_WINDOW(fresh->window));
-    sync_chrome(fresh, viewer);
+    move_page_to_new_window(
+        gtk_notebook_get_nth_page(GTK_NOTEBOOK(win->notebook), index));
 }
 
 static void on_tab_close_clicked(GtkButton *button, gpointer data)
@@ -1015,6 +1143,16 @@ static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer)
        indistinguishable once the tab strip has ellipsized them. */
     if (viewer->subheading != NULL && *viewer->subheading != '\0')
         gtk_widget_set_tooltip_text(label, viewer->subheading);
+
+    if (session_mode) {
+        GtkDragSource *drag = gtk_drag_source_new();
+
+        gtk_drag_source_set_actions(drag, GDK_ACTION_MOVE);
+        g_signal_connect(drag, "prepare", G_CALLBACK(on_drag_prepare), page);
+        g_signal_connect(drag, "drag-begin", G_CALLBACK(on_drag_begin), page);
+        g_signal_connect(drag, "drag-cancel", G_CALLBACK(on_drag_cancel), page);
+        gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(drag));
+    }
     return box;
 }
 
@@ -1145,6 +1283,31 @@ static void viewer_free(Viewer *viewer)
     g_free(viewer);
 }
 
+/* WebKit puts its own drop target on the WebView, and it claims a drag
+   before one can reach the window beneath -- which is where a dropped
+   document has to land.  Nothing may be dropped into a rendered markdown
+   document, so the view has no use for a target of its own, and taking it
+   away is what lets the window negotiate the drag properly: with the target
+   still there, a drop over the page is delivered seconds late and the drag
+   is reported as having found nothing. */
+static void release_web_view_drops(GtkWidget *view)
+{
+    GListModel *controllers = gtk_widget_observe_controllers(view);
+    guint count = g_list_model_get_n_items(controllers);
+
+    /* Backwards: removing a controller shortens the list. */
+    for (guint i = count; i > 0; i--) {
+        GtkEventController *controller = g_list_model_get_item(controllers,
+                                                               i - 1);
+
+        if (GTK_IS_DROP_TARGET(controller)
+            || GTK_IS_DROP_TARGET_ASYNC(controller))
+            gtk_widget_remove_controller(view, controller);
+        g_object_unref(controller);
+    }
+    g_object_unref(controllers);
+}
+
 static void add_tab(Window *win, Viewer *viewer)
 {
     viewer->win = win;
@@ -1164,12 +1327,11 @@ static void add_tab(Window *win, Viewer *viewer)
 
     int index = gtk_notebook_append_page(GTK_NOTEBOOK(win->notebook), page,
                                          build_tab_label(page, viewer));
-    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(win->notebook), page, TRUE);
-    /* Only in a session.  A diff has one document and one window, and git is
-       waiting on the process: there is nothing to drag it to. */
+    /* Neither reorderable nor detachable: both run GtkNotebook's own tab
+       drag, which is what corrupts the strip, and either would fight the
+       drag source on the tab label for the same gesture. */
     if (session_mode)
-        gtk_notebook_set_tab_detachable(GTK_NOTEBOOK(win->notebook), page,
-                                        TRUE);
+        release_web_view_drops(GTK_WIDGET(viewer->webview));
     update_tabs(win);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(win->notebook), index);
     sync_chrome(win, viewer);
@@ -1180,6 +1342,7 @@ static void on_window_destroy(GtkWidget *widget, gpointer data)
     Window *win = data;
 
     (void) widget;
+    debug_log("window %d destroyed", win->id);
     win->closing = TRUE;
     /* The idle holds a pointer to this window, which is about to go. */
     if (win->refresh != 0) {
@@ -1199,7 +1362,11 @@ static Window *window_new(GtkApplication *app)
     gtk_window_set_default_icon_name(
         g_application_get_application_id(G_APPLICATION(app)));
 
+    static int serial = 0;
     Window *win = g_new0(Window, 1);
+
+    win->id = ++serial;
+    debug_log("window %d created", win->id);
     win->window = gtk_application_window_new(app);
     gtk_window_set_default_size(GTK_WINDOW(win->window), 1100, 850);
     /* Outlives the destroy handler, which still reads it. */
@@ -1217,12 +1384,6 @@ static Window *window_new(GtkApplication *app)
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(win->notebook), TRUE);
     gtk_notebook_set_show_border(GTK_NOTEBOOK(win->notebook), FALSE);
     gtk_notebook_set_show_tabs(GTK_NOTEBOOK(win->notebook), FALSE);
-    /* The group name is what lets a tab be dragged from one of these windows
-       into another: GTK will only drop a tab into a notebook sharing it. */
-    if (session_mode)
-        gtk_notebook_set_group_name(GTK_NOTEBOOK(win->notebook), "md-view");
-    g_signal_connect(win->notebook, "create-window",
-                     G_CALLBACK(on_create_window), win);
     g_signal_connect(win->notebook, "page-added", G_CALLBACK(on_page_added),
                      win);
     g_signal_connect(win->notebook, "switch-page", G_CALLBACK(on_switch_page),
@@ -1237,9 +1398,8 @@ static Window *window_new(GtkApplication *app)
     gtk_window_set_child(GTK_WINDOW(win->window), content);
 
     if (session_mode) {
-        /* On the window, not the notebook: the notebook's own target covers
-           the tab strip, and this one takes the header. */
-        GtkDropTarget *drop = gtk_drop_target_new(GTK_TYPE_NOTEBOOK_PAGE,
+        /* On the window, so a document can be dropped anywhere on it. */
+        GtkDropTarget *drop = gtk_drop_target_new(GTK_TYPE_WIDGET,
                                                   GDK_ACTION_MOVE);
         g_signal_connect(drop, "drop", G_CALLBACK(on_drop_page), win);
         gtk_widget_add_controller(win->window, GTK_EVENT_CONTROLLER(drop));

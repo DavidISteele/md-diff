@@ -228,8 +228,8 @@ file it there; `Ctrl+Shift+D` does the same without the mouse.
 A window down to its last document hides the strip again, which would leave
 nothing to take hold of. The button in the header bar, or `Ctrl+Shift+B`, pins
 that window's strip open so its document can still be dragged out. Only the
-window being dragged *from* needs it: a window takes a dropped tab on its
-header bar, so the one being dropped onto needs no strip at all.
+window being dragged *from* needs it: a dropped tab is taken anywhere on the
+window it lands on, so the one being dropped onto needs no strip at all.
 
 Both are also application actions, for a keybinding of your own or a script:
 
@@ -348,19 +348,18 @@ Handles complex box-drawing diagrams including:
 
 ## Known issues
 
-### Dragging a tab out corrupts the tab strip (GTK 4.8)
+### GtkNotebook's tab drag is broken in GTK 4.8, and is not used
 
-Dragging a tab out of an md-view window to make a new window leaves the tab
-strip misdrawn for the rest of that window's life. The tab you switch to is
-not repainted, its neighbour loses an edge, and dropping a tab into its own
-content area can crash the window. It takes four or more open documents to
-show up reliably, and once triggered it is repeatable until the window is
-closed.
+Dragging one of GtkNotebook's own tabs out to a new window corrupts the strip
+it leaves behind: the tab switched to is not repainted, its neighbour loses an
+edge, and dropping a tab into its own content area can crash the window. It
+needs four or more open documents to show reliably, and once triggered it
+repeats until the window is closed.
 
-This is a GTK bug, not an md-view one. `tests/notebook-repro.c` is a stock
+This is GTK's, not this project's. `tests/notebook-repro.c` is a stock
 `GtkNotebook` with plain labels, detachable tabs and the smallest possible
-`create-window` handler -- no WebKit, nothing from this project -- and it
-corrupts its own strip the same way:
+`create-window` handler -- no WebKit, nothing from here -- and it corrupts its
+own strip the same way:
 
 ```
 cc -O2 -Wall $(pkg-config --cflags gtk4) -o /tmp/notebook-repro \
@@ -368,29 +367,36 @@ cc -O2 -Wall $(pkg-config --cflags gtk4) -o /tmp/notebook-repro \
 /tmp/notebook-repro          # drag a tab out, then switch tabs
 ```
 
-Debian 12 pins GTK to 4.8.3 (September 2022), which is where the GTK4
-notebook's drag-and-drop was newest and least settled; the WebKit beside it
-is three years younger. Nothing in this window can fix it from above -- the
-attempts are recorded in the git history, and none of them held.
+Debian 12 pins GTK to 4.8.3 (September 2022), where the GTK4 notebook's
+drag-and-drop was newest and least settled. It is no better in 4.14.
 
-The gesture is kept because it works when it works, and because everything
-it does is also on the keyboard: `Ctrl+Shift+D` undocks a document without
-any dragging, and has never misbehaved. Re-test after a GTK upgrade with the
-reproducer above; if the strip survives, the workarounds below can go with
-the bug.
+So none of it is used. The notebook's tabs are neither detachable nor
+reorderable, there is no tab group and no `create-window` handler, and
+dragging a document between windows is built here instead, out of an ordinary
+`GtkDragSource` on the tab and a `GtkDropTarget` on the window -- which are
+not affected. The move itself is the same detach-and-append the keyboard has
+always used. What is lost is reordering tabs within a strip, which was
+GtkNotebook's to provide.
 
-What is here on account of it:
+Two things that follow, and are worth knowing before changing them back:
 
-- `refresh_window` in `viewer/md-diff-view.c` defers hiding the tab strip and
-  closing an emptied window until after the drag has finished. This one is a
-  genuine fix -- doing that work inside `page-added` and `page-removed` pulls
-  widgets out from under a drag GTK has not finished with, and made the
-  corruption much worse.
-- `MD_DIFF_DEBUG_TABS=1` prints the state of every tab label -- size,
-  visibility, mapping -- on each switch and after each move. It is what
-  established that the labels are correctly sized, visible and mapped while
-  drawing blank, which is what ruled out every explanation except GTK's own
-  rendering.
+- **WebKit's own drop target is removed from each view** (`release_web_view_drops`).
+  It claims a drag before one can reach the window beneath, and a drop over
+  the page area is then delivered seconds late and reported as having found
+  no target. Nothing can be dropped into a rendered document, so the view has
+  no use for it.
+- **GPU compositing is off** (`WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER`).
+  Reparenting a view into another window takes its compositing surface away,
+  and WebKit does not paint into the new one until the page is dirtied -- a
+  scroll will do it, but a document too short to scroll simply stays blank.
+  These are pages of static text; the GPU context per tab bought nothing.
+
+`MD_DIFF_DEBUG=1` reports every window, move, drag and drop with a timestamp,
+plus the size, visibility and mapping of every tab label. The order and the
+gap between a drag reporting itself cancelled and the drop arriving is what
+distinguishes a document let go over the desktop from one that landed
+somewhere -- which is not obvious from the screen, and cost a long time to
+learn.
 
 ## Dependencies
 

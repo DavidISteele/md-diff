@@ -311,10 +311,14 @@ else
     # in the window that was already open rather than one of its own.
     # Windows are titled by the tab in front, so X can be asked directly.
     # GTK keeps a 1x1 helper window off-screen that is not one of ours.
+    # Only real windows: the viewer also owns a 1x1 helper surface, and a
+    # drag in flight owns a tab-sized icon surface, both carrying the same
+    # WM_CLASS.  Anything narrower than a window is neither.
     app_windows() {
         xwininfo -root -tree 2>/dev/null |
             grep '("md-diff-view" "md-diff-view")' |
-            grep -vc '1x1+-100+-100'
+            grep -oE '[0-9]+x[0-9]+\+' |
+            awk -F x '$1 > 400 { n++ } END { print n + 0 }'
     }
 
     if command -v xwininfo >/dev/null && [[ -n "${DISPLAY:-}" ]]; then
