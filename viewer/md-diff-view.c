@@ -738,6 +738,16 @@ static void sync_chrome(Window *win, Viewer *viewer)
         find_text(viewer,
                   gtk_editable_get_text(GTK_EDITABLE(win->search_entry)));
 
+    /* The keyboard belongs to the document, not to the strip above it.
+       GtkNotebook claims the focus for itself every time the current page
+       changes, and while it holds it the page is deaf -- Page Up, Page Down,
+       Home and End reach nothing, and the notebook's own Left/Right keynav
+       walks the tabs instead.  A click into the page hands the keyboard to
+       WebKit and the same keys start working, which is why the window seems
+       to change its mind about what they do.  Every route to a new document
+       in front arrives here, so this is where the keyboard goes back to it. */
+    if (!search_focused(win))
+        gtk_widget_grab_focus(GTK_WIDGET(viewer->webview));
 }
 
 /* One document -- every diff, and md-view until a second arrives -- looks
@@ -815,6 +825,23 @@ static void schedule_refresh(Window *win)
 {
     if (win->refresh == 0)
         win->refresh = g_timeout_add(SETTLE_MS, refresh_window, win);
+}
+
+/* Clicking a tab hands the focus to the notebook, and if that tab was
+   already the current one there is no switch-page to hand it back.  The
+   strip is a place to click, not a place for the keyboard to sit: left
+   there, GtkNotebook's own Left/Right keynav walks the tabs while the
+   document ignores Page Up and Page Down.  The tabs have keys of their own
+   -- Ctrl+Page Up/Down and Alt+1..9 -- and do not need these as well. */
+static void on_focus_widget(GObject *window, GParamSpec *spec, gpointer data)
+{
+    Window *win = data;
+    Viewer *viewer = current_viewer(win);
+    (void) spec;
+
+    if (gtk_window_get_focus(GTK_WINDOW(window)) == win->notebook
+        && viewer != NULL)
+        gtk_widget_grab_focus(GTK_WIDGET(viewer->webview));
 }
 
 static void on_switch_page(GtkNotebook *notebook, GtkWidget *page,
@@ -1390,6 +1417,8 @@ static Window *window_new(GtkApplication *app)
                      win);
     g_signal_connect(win->notebook, "page-removed", G_CALLBACK(on_page_removed),
                      win);
+    g_signal_connect(win->window, "notify::focus-widget",
+                     G_CALLBACK(on_focus_widget), win);
 
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     add_search_bar(content, win);
