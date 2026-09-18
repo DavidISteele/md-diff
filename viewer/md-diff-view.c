@@ -20,12 +20,14 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
 
 #include "nav_js.h"    /* NAV_JS, generated from nav.js by the Makefile */
 #include "find_js.h"   /* FIND_JS, likewise from find.js */
+#include "toc_js.h"    /* TOC_JS, likewise from toc.js */
 
 #define SANDBOX_ENV "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"
 
@@ -90,6 +92,11 @@ struct Window {
     GtkWidget *search_bar;
     GtkWidget *search_entry;
     GtkWidget *search_counter;
+    GtkWidget *toc;          /* outline pane, hidden until it is asked for */
+    GtkWidget *toc_list;
+    GtkWidget *toc_button;
+    GtkWidget *toc_paned;
+    gboolean toc_sized;      /* opened once: the width is the reader's now */
     GtkWidget *tabs_button;  /* NULL outside a session */
     gboolean tabs_pinned;    /* strip held open, to drag a document out */
     guint refresh;           /* pending idle: see schedule_refresh */
@@ -109,6 +116,8 @@ static void close_tab(Window *win);
 static void step_tab(Window *win, int delta);
 static void detach_tab(Window *win);
 static void toggle_tabs(Window *win);
+static void toggle_toc(Window *win);
+static void refresh_toc(Window *win, Viewer *viewer);
 static Window *window_new(GtkApplication *app);
 static GtkWidget *build_tab_label(GtkWidget *page, Viewer *viewer);
 
@@ -293,16 +302,24 @@ static void on_js_finished(GObject *source, GAsyncResult *result, gpointer data)
 }
 
 /* Token replace rather than printf: the scripts contain a JS modulo. */
-static void run_js(Viewer *viewer, const char *source, const char *call,
-                   GtkWidget *counter)
+static void run_js_for(Viewer *viewer, const char *source, const char *call,
+                       GAsyncReadyCallback ready, gpointer data)
 {
     char **parts = g_strsplit(source, "__CALL__", -1);
     char *script = g_strjoinv(call, parts);
 
     webkit_web_view_evaluate_javascript(viewer->webview, script, -1, NULL, NULL,
-                                        NULL, on_js_finished, counter);
+                                        NULL, ready, data);
     g_free(script);
     g_strfreev(parts);
+}
+
+/* The common case: whatever the script returns is a caption, and `counter`
+   is the label to put it in -- or NULL when nothing is waiting for it. */
+static void run_js(Viewer *viewer, const char *source, const char *call,
+                   GtkWidget *counter)
+{
+    run_js_for(viewer, source, call, on_js_finished, counter);
 }
 
 static void navigate(Viewer *viewer, int delta)
@@ -427,6 +444,128 @@ static void on_navigate_clicked(GtkButton *button, gpointer data)
                      g_object_get_data(G_OBJECT(button), "delta")));
 }
 
+/* --- Outline --- */
+
+/* One row per heading, indented by depth.  The depths are relative to the
+   shallowest heading in the document, so a file whose sections are all h2
+   -- everything under a single h1 title, which is most of them -- reads as
+   a flat list rather than one indented off the left edge. */
+static void fill_toc(Window *win, const char *outline)
+{
+    GtkListBox *list = GTK_LIST_BOX(win->toc_list);
+    GtkWidget *child;
+    char **lines;
+    int top = 7;
+
+    while ((child = gtk_widget_get_first_child(GTK_WIDGET(list))) != NULL)
+        gtk_list_box_remove(list, child);
+
+    /* Nothing to show: the list's placeholder says so. */
+    if (outline == NULL || *outline == '\0')
+        return;
+
+    lines = g_strsplit(outline, "\n", -1);
+    for (int i = 0; lines[i] != NULL; i++) {
+        int level = lines[i][0] - '0';
+
+        if (level >= 1 && level <= 6 && level < top)
+            top = level;
+    }
+
+    for (int i = 0; lines[i] != NULL; i++) {
+        int level = lines[i][0] - '0';
+
+        if (level < 1 || level > 6 || lines[i][1] != '\t')
+            continue;
+
+        GtkWidget *label = gtk_label_new(lines[i] + 2);
+        GtkWidget *row = gtk_list_box_row_new();
+
+        gtk_label_set_xalign(GTK_LABEL(label), 0.0);
+        gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+        gtk_widget_set_margin_start(label, 6 + (level - top) * 14);
+        gtk_widget_set_margin_end(label, 6);
+        gtk_widget_set_margin_top(label, 3);
+        gtk_widget_set_margin_bottom(label, 3);
+        if (level == top)
+            gtk_widget_add_css_class(label, "heading");
+
+        /* The index the script knows the heading by, carried on the row
+           rather than taken from its position: a line the parse above
+           skipped would put the two out of step. */
+        g_object_set_data(G_OBJECT(row), "heading", GINT_TO_POINTER(i));
+        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), label);
+        gtk_list_box_append(list, row);
+    }
+    g_strfreev(lines);
+}
+
+static void on_toc_collected(GObject *source, GAsyncResult *result,
+                             gpointer data)
+{
+    /* The document, recovered from the view it was evaluated in: the pane
+       belongs to the window, and by the time this lands the tab in front
+       may be a different one -- whose outline this is not. */
+    Viewer *viewer = g_object_get_data(source, "viewer");
+    GError *error = NULL;
+    JSCValue *value = webkit_web_view_evaluate_javascript_finish(
+        WEBKIT_WEB_VIEW(source), result, &error);
+
+    (void) data;
+    if (value == NULL) {
+        g_clear_error(&error);
+        return;
+    }
+    if (viewer != NULL && viewer->win != NULL
+        && current_viewer(viewer->win) == viewer
+        && jsc_value_is_string(value)) {
+        char *outline = jsc_value_to_string(value);
+
+        fill_toc(viewer->win, outline);
+        g_free(outline);
+    }
+    g_object_unref(value);
+}
+
+/* Ask a document for its headings.  Only worth doing while the pane is
+   open, and it is reasked on every route to a new document rather than
+   cached, because a document is read far less often than it is left alone.
+ *
+ * The document is named rather than looked up: switch-page runs before the
+ * notebook has finished switching, so asking it what is current there would
+ * fill the pane from the tab being left. */
+static void refresh_toc(Window *win, Viewer *viewer)
+{
+    if (win->toc == NULL || !gtk_widget_get_visible(win->toc))
+        return;
+    if (viewer == NULL) {
+        fill_toc(win, NULL);
+        return;
+    }
+    run_js_for(viewer, TOC_JS, "collect()", on_toc_collected, NULL);
+}
+
+static void on_toc_row_activated(GtkListBox *list, GtkListBoxRow *row,
+                                 gpointer data)
+{
+    Window *win = data;
+    Viewer *viewer = current_viewer(win);
+
+    (void) list;
+    if (viewer == NULL || row == NULL)
+        return;
+
+    char *call = g_strdup_printf(
+        "go(%d)", GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "heading")));
+
+    run_js(viewer, TOC_JS, call, NULL);
+    g_free(call);
+    /* The keyboard goes straight back to the document: the pane is for
+       pointing at a section, not for reading one, and a list that kept the
+       focus would leave Page Down walking rows. */
+    gtk_widget_grab_focus(GTK_WIDGET(viewer->webview));
+}
+
 static void on_load_changed(WebKitWebView *webview, WebKitLoadEvent event,
                             gpointer data)
 {
@@ -443,25 +582,71 @@ static void on_load_changed(WebKitWebView *webview, WebKitLoadEvent event,
         run_js(viewer, NAV_JS, "label()",
                viewer == current_viewer(viewer->win) ? viewer->win->counter
                                                      : NULL);
+        /* The outline is the document's own headings, so there is nothing
+           to fill the pane with until the document has arrived. */
+        if (viewer == current_viewer(viewer->win))
+            refresh_toc(viewer->win, viewer);
     }
 }
 
 /* --- Hardening --- */
 
+/* Everything but the fragment: the part of a URI that has to match for a
+   navigation to be going nowhere. */
+static gsize uri_base_length(const char *uri)
+{
+    const char *hash = strchr(uri, '#');
+
+    return hash != NULL ? (gsize) (hash - uri) : strlen(uri);
+}
+
+/* True when the navigation would land inside the document already loaded --
+   an anchor link, which is what a table of contents is made of.  The whole
+   URI up to the fragment has to match, so this admits the document's own
+   section links and nothing else; a target with no fragment at all is a
+   reload of the page rather than a move within it, and this window has
+   nowhere to reload from -- the document was handed to it as a string. */
+static gboolean same_document_link(WebKitWebView *webview,
+                                   WebKitPolicyDecision *decision)
+{
+    const char *current = webkit_web_view_get_uri(webview);
+    const char *target;
+    WebKitNavigationAction *action;
+
+    if (!WEBKIT_IS_NAVIGATION_POLICY_DECISION(decision) || current == NULL)
+        return FALSE;
+    action = webkit_navigation_policy_decision_get_navigation_action(
+        WEBKIT_NAVIGATION_POLICY_DECISION(decision));
+    if (action == NULL)
+        return FALSE;
+    target = webkit_uri_request_get_uri(
+        webkit_navigation_action_get_request(action));
+    if (target == NULL || strchr(target, '#') == NULL)
+        return FALSE;
+
+    gsize length = uri_base_length(target);
+
+    return length == uri_base_length(current)
+        && strncmp(target, current, length) == 0;
+}
+
 /* The document is the only thing this window ever shows.  A link in it must
    not be able to navigate the view somewhere else, and nothing may open a
-   second one. */
+   second one.  Moving about inside the document is not navigating away from
+   it, though, and refusing that would make a table of contents a list of
+   headings that do nothing when clicked. */
 static gboolean on_decide_policy(WebKitWebView *webview,
                                  WebKitPolicyDecision *decision,
                                  WebKitPolicyDecisionType type, gpointer data)
 {
     Viewer *viewer = data;
-    (void) webview;
 
     switch (type) {
     case WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION:
         if (!viewer->loaded)
             return FALSE;  /* the document itself */
+        if (same_document_link(webview, decision))
+            return FALSE;
         webkit_policy_decision_ignore(decision);
         return TRUE;
     case WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION:
@@ -571,6 +756,10 @@ static gboolean on_key(GtkEventControllerKey *controller, guint keyval,
         toggle_tabs(win);
     } else if (ctrl && shift && g_ascii_strcasecmp(name, "d") == 0) {
         detach_tab(win);
+    } else if (g_str_equal(name, "F9")) {
+        /* What a document viewer's side pane answers to elsewhere -- Evince
+           and Papers both -- and free of the Ctrl+Shift crowd above. */
+        toggle_toc(win);
     } else if (ctrl && (g_str_equal(name, "Page_Down")
                         || g_str_equal(name, "Next"))) {
         step_tab(win, 1);
@@ -738,6 +927,10 @@ static void sync_chrome(Window *win, Viewer *viewer)
         find_text(viewer,
                   gtk_editable_get_text(GTK_EDITABLE(win->search_entry)));
 
+    /* The outline pane is the window's for the same reason, and headings
+       are per document: opened once, it re-reads whatever is in front. */
+    refresh_toc(win, viewer);
+
     /* The keyboard belongs to the document, not to the strip above it.
        GtkNotebook claims the focus for itself every time the current page
        changes, and while it holds it the page is deaf -- Page Up, Page Down,
@@ -778,6 +971,44 @@ static void toggle_tabs(Window *win)
         !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(win->tabs_button)));
 }
 
+static void on_toc_toggled(GtkToggleButton *button, gpointer data)
+{
+    Window *win = data;
+    gboolean shown = gtk_toggle_button_get_active(button);
+
+    if (win->toc == NULL)
+        return;
+    gtk_widget_set_visible(win->toc, shown);
+    if (shown) {
+        /* A pane hidden since the window was built has never been laid out,
+           and GtkPaned settles it at the list's own width -- narrower than
+           a heading wants.  Said once, so a width dragged to taste is not
+           undone the next time the pane is asked for. */
+        if (!win->toc_sized) {
+            gtk_paned_set_position(GTK_PANED(win->toc_paned), 260);
+            win->toc_sized = TRUE;
+        }
+        refresh_toc(win, current_viewer(win));
+        return;
+    }
+
+    /* The pane taking the keyboard with it as it goes would leave the
+       window deaf, so the document takes it back. */
+    Viewer *viewer = current_viewer(win);
+
+    if (viewer != NULL && !search_focused(win))
+        gtk_widget_grab_focus(GTK_WIDGET(viewer->webview));
+}
+
+static void toggle_toc(Window *win)
+{
+    if (win->toc_button == NULL)
+        return;
+    gtk_toggle_button_set_active(
+        GTK_TOGGLE_BUTTON(win->toc_button),
+        !gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(win->toc_button)));
+}
+
 /* Put the window back in order once the notebook has finished with it.
  *
  * page-added and page-removed are emitted in the middle of a tab drag, while
@@ -790,6 +1021,14 @@ static void toggle_tabs(Window *win)
  *
  * An idle runs after the drag completes, when the notebook is settled and
  * these are ordinary operations again.
+ *
+ * The misdraw underneath is GTK's own, not something this code provokes:
+ * tests/notebook-repro.c reproduces it with a passive notebook that does no
+ * structural work at all, on 4.14.5 under X11.  It is GTK issue #4423, open
+ * and without a single comment since 2021, and GtkNotebook's drag-and-drop
+ * is not maintained -- upstream's answer for detachable tabs is libadwaita's
+ * AdwTabView.  So this is permanent, not something to retry on a newer GTK.
+ * https://gitlab.gnome.org/GNOME/gtk/-/issues/4423
  */
 static gboolean refresh_window(gpointer data)
 {
@@ -1197,6 +1436,58 @@ static void add_tabs_button(GtkWidget *header, Window *win)
     win->tabs_button = button;
 }
 
+static void add_toc_button(GtkWidget *header, Window *win)
+{
+    GtkWidget *button = gtk_toggle_button_new();
+
+    gtk_button_set_icon_name(GTK_BUTTON(button), "sidebar-show-symbolic");
+    gtk_widget_set_tooltip_text(button,
+                                "Show the document's headings, to jump "
+                                "between sections (F9)");
+    g_signal_connect(button, "toggled", G_CALLBACK(on_toc_toggled), win);
+    gtk_header_bar_pack_start(GTK_HEADER_BAR(header), button);
+    win->toc_button = button;
+}
+
+/* The outline pane, down the left of the document.
+ *
+ * Built once per window and filled from whichever tab is in front, like the
+ * search bar and for the same reason: opened on one document it stays open
+ * across the rest, rather than being something to ask for again with every
+ * tab.  It is hidden until it is asked for -- a document short enough to
+ * read at a glance has no use for it, and the space belongs to the text.
+ *
+ * Rows carry no link: clicking one asks the script to scroll to the heading
+ * it was built from.  Anchors would do as well for a document pandoc gave
+ * ids to and nothing at all for one it did not, and an index is true of
+ * both. */
+static GtkWidget *build_toc_pane(Window *win)
+{
+    GtkWidget *scroller = gtk_scrolled_window_new();
+    GtkWidget *placeholder = gtk_label_new("No headings");
+
+    win->toc_list = gtk_list_box_new();
+    gtk_list_box_set_selection_mode(GTK_LIST_BOX(win->toc_list),
+                                    GTK_SELECTION_SINGLE);
+    g_signal_connect(win->toc_list, "row-activated",
+                     G_CALLBACK(on_toc_row_activated), win);
+
+    gtk_widget_add_css_class(placeholder, "dim-label");
+    gtk_widget_set_margin_top(placeholder, 12);
+    gtk_widget_set_margin_start(placeholder, 6);
+    gtk_widget_set_margin_end(placeholder, 6);
+    gtk_list_box_set_placeholder(GTK_LIST_BOX(win->toc_list), placeholder);
+
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller),
+                                  win->toc_list);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(scroller, 180, -1);
+    gtk_widget_set_visible(scroller, FALSE);
+    win->toc = scroller;
+    return scroller;
+}
+
 static void add_stepper(GtkWidget *header, Window *win)
 {
     static const struct {
@@ -1402,6 +1693,7 @@ static Window *window_new(GtkApplication *app)
                      win);
 
     win->header = gtk_header_bar_new();
+    add_toc_button(win->header, win);
     if (session_mode)
         add_tabs_button(win->header, win);
     add_stepper(win->header, win);
@@ -1421,9 +1713,21 @@ static Window *window_new(GtkApplication *app)
                      G_CALLBACK(on_focus_widget), win);
 
     GtkWidget *content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+
     add_search_bar(content, win);
     gtk_widget_set_vexpand(win->notebook, TRUE);
-    gtk_box_append(GTK_BOX(content), win->notebook);
+    /* The pane keeps the width it is given and the document takes the rest,
+       so opening and closing it does not resize the text twice over. */
+    gtk_paned_set_start_child(GTK_PANED(paned), build_toc_pane(win));
+    gtk_paned_set_resize_start_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_shrink_start_child(GTK_PANED(paned), FALSE);
+    gtk_paned_set_end_child(GTK_PANED(paned), win->notebook);
+    gtk_paned_set_resize_end_child(GTK_PANED(paned), TRUE);
+    gtk_paned_set_shrink_end_child(GTK_PANED(paned), FALSE);
+    gtk_widget_set_vexpand(paned, TRUE);
+    win->toc_paned = paned;
+    gtk_box_append(GTK_BOX(content), paned);
     gtk_window_set_child(GTK_WINDOW(win->window), content);
 
     if (session_mode) {
@@ -1460,18 +1764,25 @@ static Window *session_window(GtkApplication *app)
    one window operation with no other way in: a document can be opened from a
    shell and closed from its tab, but only a drag could move it -- and a drag
    is exactly what a script, or a desktop shortcut, cannot do. */
-static void on_detach_action(GSimpleAction *action, GVariant *parameter,
-                             gpointer data)
+/* The window an action should act on: the one in front, or -- for an
+   invocation from a script, where nothing here has the focus -- the one a
+   document would open in. */
+static Window *action_window(GtkApplication *app)
 {
-    GtkApplication *app = data;
     GtkWindow *active = gtk_application_get_active_window(app);
     Window *win = active != NULL
         ? g_object_get_data(G_OBJECT(active), "md-window") : NULL;
 
+    return win != NULL ? win : session_window(app);
+}
+
+static void on_detach_action(GSimpleAction *action, GVariant *parameter,
+                             gpointer data)
+{
+    Window *win = action_window(data);
+
     (void) action;
     (void) parameter;
-    if (win == NULL)
-        win = session_window(app);
     if (win != NULL)
         detach_tab(win);
 }
@@ -1479,22 +1790,29 @@ static void on_detach_action(GSimpleAction *action, GVariant *parameter,
 static void on_toggle_tabs_action(GSimpleAction *action, GVariant *parameter,
                                   gpointer data)
 {
-    GtkApplication *app = data;
-    GtkWindow *active = gtk_application_get_active_window(app);
-    Window *win = active != NULL
-        ? g_object_get_data(G_OBJECT(active), "md-window") : NULL;
+    Window *win = action_window(data);
 
     (void) action;
     (void) parameter;
-    if (win == NULL)
-        win = session_window(app);
     if (win != NULL)
         toggle_tabs(win);
+}
+
+static void on_toggle_toc_action(GSimpleAction *action, GVariant *parameter,
+                                 gpointer data)
+{
+    Window *win = action_window(data);
+
+    (void) action;
+    (void) parameter;
+    if (win != NULL)
+        toggle_toc(win);
 }
 
 static const GActionEntry ACTIONS[] = {
     { "detach-tab", on_detach_action, NULL, NULL, NULL, { 0 } },
     { "toggle-tabs", on_toggle_tabs_action, NULL, NULL, NULL, { 0 } },
+    { "toggle-toc", on_toggle_toc_action, NULL, NULL, NULL, { 0 } },
 };
 
 /* One process, one document: the document was read before the application

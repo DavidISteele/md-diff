@@ -80,6 +80,7 @@ attach to — see [WebKit sandbox](#webkit-sandbox). `md-diff-gui` finds it in
 | `n` / `Tab` / `Alt+Down` | Next change |
 | `p` / `Shift+Tab` / `Alt+Up` | Previous change |
 | `Ctrl+F`, `Ctrl+S` | Find |
+| `F9` | Show / hide the outline |
 | `Ctrl` `+` / `-` / `0` | Zoom in / out / reset |
 | `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next document (md-view) |
 | `Alt+1` … `Alt+9` | Nth document (md-view) |
@@ -137,7 +138,10 @@ markdown file straight through, which means a document can arrive carrying
   and a document that asks for one is either tracking who opened it or
   carrying something out.
 - **The document cannot navigate the window.** Links and popups are refused
-  after the initial load.
+  after the initial load. A link into the document itself is not that: an
+  anchor whose target is the page already open scrolls to it, which is what
+  makes a table of contents work, and the whole URI up to the `#` has to
+  match for that exception to apply.
 
 #### WebKit sandbox
 
@@ -220,6 +224,25 @@ Otherwise, the file opens in the GUI window, with `Ctrl+F` / `Ctrl+S`,
 chrome is absent — the search box and the overview strip stay, the
 latter as a scrollbar that doesn't fade. `--no-sandbox` applies here too.
 
+#### The outline
+
+`F9`, or the button at the left of the header bar, opens a pane down the
+side listing the document's headings, indented by depth. Click one and the
+document scrolls to it; the keyboard goes back to the page, so the next
+`Page Down` still belongs to the text.
+
+The list is read from the headings in the rendered document, so it needs
+nothing asked for at the command line — `--toc` puts pandoc's own table of
+contents *in* the document, which is what you want in a file written with
+`-o`, while the pane is the window's and costs the document nothing. Those
+anchor links work too, now that a link into the page is allowed to scroll
+it — see [Untrusted documents](#untrusted-documents).
+
+Like the search box, the pane belongs to the window rather than to a
+document: opened once, it re-reads whatever tab you move to. The depths are
+relative, so a file whose sections all sit under one `#` title reads as a
+flat list rather than one indented off the left edge.
+
 Multiple files can be passed in together, and they are rendered using tabs,
 in order.
 
@@ -237,11 +260,13 @@ You can also drag the tab onto a different md-view window.
 To re-dock a document that has no tab, use the button in the title bar to show
 the tab-strip (or `Ctrl-Shift-B`), and it's tab will re-appear.
 
-Both are also application actions, for a keybinding of your own or a script:
+These are also application actions, for a keybinding of your own or a
+script:
 
 ```
 gapplication action org.user.local.md-view toggle-tabs
 gapplication action org.user.local.md-view detach-tab
+gapplication action org.user.local.md-view toggle-toc
 ```
 
 A document keeps its place across the move — the scroll position, the search

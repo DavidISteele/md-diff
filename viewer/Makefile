@@ -6,7 +6,7 @@ LDLIBS = $(shell pkg-config --libs $(PKGS))
 # The browser-side scripts stay JavaScript in .js files, and become C string
 # literals here, so the binary carries no runtime dependency on files sitting
 # next to it.
-SCRIPTS = nav_js.h find_js.h
+SCRIPTS = nav_js.h find_js.h toc_js.h
 
 md-diff-view: md-diff-view.c $(SCRIPTS)
 	$(CC) $(CFLAGS) $(shell pkg-config --cflags $(PKGS)) -o $@ $< $(LDLIBS)
